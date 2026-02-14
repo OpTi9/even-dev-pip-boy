@@ -1,8 +1,6 @@
 # Even Hub Painless Simulator v0.0.1
 
 ![demo](./media/demo.png)
-![epub](./media/epub.png)
-![epub2](./media/epub2.png)
 
 This project is a minimal starter app for building and testing Even Hub interactions in the Even Hub Simulator, without a physical Even device.
 
@@ -20,11 +18,12 @@ The app demonstrates:
 The goal of this repository is to provide a simple starting point for building Even Hub applications while keeping the architecture easy to understand and extend.
 
 
-|    AppName   |                     Short Description                |
-|:------------:|:-----------------------------------------------------|
-|    [clock](./apps/clock/)     | Clock App - app refresh test showcase                |
-|    [demo](./apps/demo/)      | Demo app (base) - simple control showcase            |
-|    [epub](./apps/epub/)      | Epub reader demo #chortya/epub-reader-g2             |
+|              AppName          |                      Short Description                          |     Visual        |
+|:-----------------------------:|:----------------------------------------------------------------| :---------------: |
+|    [clock](./apps/clock/)     | Clock App - app refresh test showcase                           | ![clock](./media/clock.png) |
+|    [demo](./apps/demo/)       | Demo app (base) - simple control showcase                       | ![demo](./media/demo.png) |
+|    [epub](./apps/epub/)       | Epub reader demo #chortya/epub-reader-g2                        | ![epub](./media/epub.png) ![epub2](./media/epub2.png) | 
+|    [stars](./apps/stars/)     | A real-time sky chart application #thibautrey/even-stars        | ![stars](./media/stars.png) |
 
 
 ---
@@ -168,7 +167,7 @@ Notes:
 
 ```
 index.html      -> Entry point required by Even Hub
-src/Main.ts     -> Common app page controller + app loader
+src/main.ts     -> Common app page controller + app loader
 apps/_shared/app-types.ts -> Shared app contract used by all apps
 apps/demo       -> Current Even demo app
 apps/demo/main.ts -> Demo app actions
@@ -177,6 +176,30 @@ apps/clock/index.ts -> Clock app module metadata
 apps/clock/main.ts -> Clock app actions
 vite.config.ts  -> Development server configuration
 ```
+
+---
+
+## Simulator Architecture (UML)
+
+```mermaid
+flowchart TD
+  A["start-even.sh"] --> B["Vite dev server (APP_NAME)"]
+  B --> C["index.html"]
+  C --> D["src/main.ts app loader"]
+  D --> E["apps/<app>/index.ts (AppModule metadata)"]
+  E --> F["apps/<app>/main.ts (connect/action handlers)"]
+  F --> G["Even Hub SDK / bridge client"]
+  G <--> H["Even Hub Simulator"]
+  F --> I["UI status + #event-log"]
+```
+
+## Entry Points
+
+* `start-even.sh`: CLI launcher, app selection, server boot, simulator launch.
+* `src/main.ts`: Runtime app discovery (`apps/*/index.ts`) and button wiring.
+* `apps/<app>/index.ts`: Registers app metadata and exports `createActions`.
+* `apps/<app>/main.ts`: Main handlers for `connect()` and `action()`.
+* Bridge-specific runtime modules: `apps/demo/even.ts`, `apps/clock/main.ts`, `apps/epub/even-client.ts`, `apps/stars/runtime.ts`
 
 ---
 
