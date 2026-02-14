@@ -22,8 +22,9 @@ The goal of this repository is to provide a simple starting point for building E
 |:-----------------------------:|:----------------------------------------------------------------| :---------------: |
 |    [clock](./apps/clock/)     | Clock App - app refresh test showcase                           | ![clock](./media/clock.png) |
 |    [demo](./apps/demo/)       | Demo app (base) - simple control showcase                       | ![demo](./media/demo.png) |
-|    [epub](./apps/epub/)       | Epub reader demo #chortya/epub-reader-g2                        | ![epub](./media/epub.png) ![epub2](./media/epub2.png) | 
-|    [stars](./apps/stars/)     | A real-time sky chart application #thibautrey/even-stars        | ![stars](./media/stars.png) |
+|    [epub](./apps/epub/)       | Epub reader demo @chortya/epub-reader-g2                        | ![epub](./media/epub.png) ![epub2](./media/epub2.png) | 
+|    [stars](./apps/stars/)     | A real-time sky chart application @thibautrey/even-stars        | ![stars](./media/stars.png) |
+|    [transit](./apps/transit/) | Public transport planner @langerhans/even-transit               | ![stars](./media/transport.png) |
 
 
 ---
@@ -199,7 +200,7 @@ flowchart TD
 * `src/main.ts`: Runtime app discovery (`apps/*/index.ts`) and button wiring.
 * `apps/<app>/index.ts`: Registers app metadata and exports `createActions`.
 * `apps/<app>/main.ts`: Main handlers for `connect()` and `action()`.
-* Bridge-specific runtime modules: `apps/demo/even.ts`, `apps/clock/main.ts`, `apps/epub/even-client.ts`, `apps/stars/runtime.ts`
+* Bridge-specific runtime modules: `apps/demo/even.ts`, `apps/clock/main.ts`, `apps/epub/even-client.ts`, `apps/stars/runtime.ts`, `apps/transit/main.ts`
 
 ---
 
