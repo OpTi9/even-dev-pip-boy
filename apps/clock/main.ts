@@ -38,6 +38,12 @@ function getMockClockClient(): ClockClient {
 function getBridgeClockClient(): ClockClient {
   const sdk = new EvenBetterSdk()
   const page = sdk.createPage('hub-clock-page')
+  const timeFormatter = new Intl.DateTimeFormat([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
 
   const title = page.addTextElement('Clock Page')
   title
@@ -56,13 +62,27 @@ function getBridgeClockClient(): ClockClient {
 
   let isTicking = true
   let intervalId: number | null = null
+  let renderInFlight = false
 
-  const renderNow = () => {
+  const renderNow = async () => {
+    if (renderInFlight) {
+      return
+    }
+
+    renderInFlight = true
     const now = new Date()
-    timeText.setContent(now.toLocaleTimeString([], { hour12: false }))
-    void page.render().catch((error) => {
+    timeText.setContent(timeFormatter.format(now))
+
+    try {
+      const updated = await timeText.updateWithEvenHubSdk()
+      if (!updated) {
+        await page.render()
+      }
+    } catch (error) {
       console.error('[clock] failed to render tick', error)
-    })
+    } finally {
+      renderInFlight = false
+    }
   }
 
   const stopTicking = () => {
@@ -78,7 +98,7 @@ function getBridgeClockClient(): ClockClient {
       if (!isTicking) {
         return
       }
-      renderNow()
+      void renderNow()
     }, 1000)
   }
 
@@ -87,7 +107,8 @@ function getBridgeClockClient(): ClockClient {
     async start() {
       isTicking = true
       stateText.setContent('State: running')
-      renderNow()
+      await page.render()
+      await renderNow()
       startTicking()
     },
     async toggleTicking() {
@@ -95,7 +116,8 @@ function getBridgeClockClient(): ClockClient {
 
       if (isTicking) {
         stateText.setContent('State: running')
-        renderNow()
+        await page.render()
+        await renderNow()
         startTicking()
       } else {
         stateText.setContent('State: paused')
