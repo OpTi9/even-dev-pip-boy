@@ -1,47 +1,146 @@
-import { initEven } from './even'
-import { updateStatus } from './ui'
+import type { AppModule } from '../apps/_shared/app-types'
 
-type EvenInstance = Awaited<ReturnType<typeof initEven>>['even']
+type AppModuleShape = {
+  app?: AppModule
+  default?: AppModule
+}
 
-let evenInstance: EvenInstance | null = null
+const appEntryModules = import.meta.glob('../apps/*/index.ts')
 
-async function start() {
-  const connectBtn = document.getElementById("connectBtn")
-  const actionBtn = document.getElementById("actionBtn")
+function extractAppName(modulePath: string): string {
+  const match = modulePath.match(/\.\.\/apps\/([^/]+)\/index\.ts$/)
+  return match?.[1] ?? ''
+}
 
-  connectBtn?.addEventListener("click", async () => {
-    updateStatus("Connecting to Even bridge...")
+function discoveredApps(): string[] {
+  return Object.keys(appEntryModules)
+    .map(extractAppName)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+}
 
-    try {
-      const { even } = await initEven()
-      evenInstance = even
+function resolveSelectedApp(appNames: string[]): string {
+  const envApp = String(import.meta.env.VITE_APP_NAME ?? '')
 
-      await even.renderStartupScreen()
+  if (envApp && appNames.includes(envApp)) {
+    return envApp
+  }
 
-      if (even.mode === 'bridge') {
-        updateStatus("Connected. Demo page rendered in Even Hub Simulator.")
-      } else {
-        updateStatus("Bridge not found. Running browser-only mock mode.")
-      }
+  if (appNames.includes('demo')) {
+    return 'demo'
+  }
 
-    } catch (err) {
-      console.error(err)
-      updateStatus("Connection failed")
-    }
+  return appNames[0] ?? ''
+}
+
+function updateStatus(text: string) {
+  console.log(`[ui] ${text}`)
+  const el = document.getElementById('status')
+  if (el) {
+    el.textContent = text
+  }
+}
+
+async function boot() {
+  const appNames = discoveredApps()
+
+  if (appNames.length === 0) {
+    updateStatus('No apps found in /apps')
+    throw new Error('No app modules found. Add apps/<name>/index.ts')
+  }
+
+  const selectedAppName = resolveSelectedApp(appNames)
+  const modulePath = `../apps/${selectedAppName}/index.ts`
+  const importer = appEntryModules[modulePath]
+
+  if (!importer) {
+    updateStatus(`App not found: ${selectedAppName}`)
+    throw new Error(`Missing app module: ${modulePath}`)
+  }
+
+  const module = (await importer()) as AppModuleShape
+  const loadedApp = module.app ?? module.default
+
+  if (!loadedApp || typeof loadedApp.createActions !== 'function') {
+    updateStatus(`Invalid app module: ${selectedAppName}`)
+    throw new Error(`App module ${modulePath} must export 'app' or default with createActions()`)
+  }
+
+  const heading = document.querySelector('#app h1')
+  const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement | null
+  const actionBtn = document.getElementById('actionBtn') as HTMLButtonElement | null
+
+  if (heading) {
+    heading.textContent = loadedApp.pageTitle ?? `Even Hub ${loadedApp.name} App`
+  }
+
+  if (connectBtn) {
+    connectBtn.textContent = loadedApp.connectLabel ?? `Connect ${loadedApp.name}`
+  }
+
+  if (actionBtn) {
+    actionBtn.textContent = loadedApp.actionLabel ?? `${loadedApp.name} Action`
+  }
+
+  document.title = `Even Demo - ${loadedApp.name}`
+  console.log('[app-loader] Selected app', {
+    selectedAppName,
+    appNames,
   })
 
-  actionBtn?.addEventListener("click", async () => {
-    if (!evenInstance) {
-      updateStatus("Not connected")
+  updateStatus(loadedApp.initialStatus ?? `${loadedApp.name} app ready`)
+  const actions = await loadedApp.createActions(updateStatus)
+  let isConnecting = false
+  let isRunningAction = false
+
+  connectBtn?.addEventListener('click', async () => {
+    if (isConnecting) {
       return
     }
 
-    updateStatus("Sending demo action...")
+    isConnecting = true
+    if (connectBtn) {
+      connectBtn.disabled = true
+    }
 
-    await evenInstance.sendDemoAction()
+    try {
+      await actions.connect()
+    } catch (error) {
+      console.error('[app-loader] connect action failed', error)
+      updateStatus('Connect action failed')
+    } finally {
+      isConnecting = false
+      if (connectBtn) {
+        connectBtn.disabled = false
+      }
+    }
+  })
 
-    updateStatus("Done")
+  actionBtn?.addEventListener('click', async () => {
+    if (isRunningAction) {
+      return
+    }
+
+    isRunningAction = true
+    if (actionBtn) {
+      actionBtn.disabled = true
+    }
+
+    try {
+      await actions.action()
+    } catch (error) {
+      console.error('[app-loader] secondary action failed', error)
+      updateStatus('Action failed')
+    } finally {
+      isRunningAction = false
+      if (actionBtn) {
+        actionBtn.disabled = false
+      }
+    }
   })
 }
 
-start()
+void boot().catch((error) => {
+  console.error('[app-loader] boot failed', error)
+  updateStatus('App boot failed')
+})

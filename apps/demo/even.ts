@@ -1,12 +1,7 @@
 import { EvenBetterSdk } from '@jappyjan/even-better-sdk'
-import { OsEventTypeList, type EvenHubEvent, waitForEvenAppBridge } from '@evenrealities/even_hub_sdk'
+import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 
 type RuntimeMode = 'bridge' | 'mock'
-type RawHostMessage = {
-  type?: unknown
-  method?: unknown
-  data?: unknown
-}
 
 export type EvenClient = {
   mode: RuntimeMode
@@ -14,7 +9,33 @@ export type EvenClient = {
   sendDemoAction: () => Promise<void>
 }
 
-let bridgeClient: EvenClient | null = null
+export type EvenInitOptions = {
+  pageId?: string
+  title?: string
+  subtitle?: string
+  inputPrompt?: string
+  actionLabel?: string
+}
+
+const DEFAULT_OPTIONS: Required<EvenInitOptions> = {
+  pageId: 'hub-simulator-demo',
+  title: 'Even Hub Simulator Demo',
+  subtitle: 'Running without a real device',
+  inputPrompt: 'Use Hub buttons to send events',
+  actionLabel: 'Action sent',
+}
+
+function normalizeOptions(options?: EvenInitOptions): Required<EvenInitOptions> {
+  return {
+    pageId: options?.pageId ?? DEFAULT_OPTIONS.pageId,
+    title: options?.title ?? DEFAULT_OPTIONS.title,
+    subtitle: options?.subtitle ?? DEFAULT_OPTIONS.subtitle,
+    inputPrompt: options?.inputPrompt ?? DEFAULT_OPTIONS.inputPrompt,
+    actionLabel: options?.actionLabel ?? DEFAULT_OPTIONS.actionLabel,
+  }
+}
+
+const bridgeClients = new Map<string, EvenClient>()
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -41,16 +62,17 @@ function getMockClient(): EvenClient {
   }
 }
 
-function getBridgeClient(): EvenClient {
+function getBridgeClient(options?: EvenInitOptions): EvenClient {
+  const resolvedOptions = normalizeOptions(options)
   const sdk = new EvenBetterSdk()
-  const page = sdk.createPage('hub-simulator-demo')
+  const page = sdk.createPage(resolvedOptions.pageId)
 
-  const title = page.addTextElement('Even Hub Simulator Demo')
+  const title = page.addTextElement(resolvedOptions.title)
   title
     .setPosition((position) => position.setX(8).setY(16))
     .setSize((size) => size.setWidth(280).setHeight(44))
 
-  const subtitle = page.addTextElement('Running without a real device')
+  const subtitle = page.addTextElement(resolvedOptions.subtitle)
   subtitle
     .setPosition((position) => position.setX(8).setY(64))
     .setSize((size) => size.setWidth(280).setHeight(44))
@@ -61,7 +83,7 @@ function getBridgeClient(): EvenClient {
     .setSize((size) => size.setWidth(280).setHeight(44))
 
   const inputTarget = page.addListElement([
-    'Use Hub buttons to send events',
+    resolvedOptions.inputPrompt,
     'Up',
     'Down',
     'Click',
@@ -134,78 +156,21 @@ function getBridgeClient(): EvenClient {
     const eventType = normalizeEventType(rawEventType)
     const label = eventLabel(eventType)
 
-    const suffix = label === 'Unknown' ? ` (${String(rawEventType ?? 'n/a')})` : ''
-    lastInput.setContent(`Last input: ${label}${suffix}`)
-    await page.render()
-  }
-
-  const tryHandleRawHostMessage = async (message: unknown): Promise<void> => {
-    let parsed: RawHostMessage | null = null
-
-    if (typeof message === 'string') {
-      try {
-        parsed = JSON.parse(message) as RawHostMessage
-      } catch {
-        return
-      }
-    } else if (typeof message === 'object' && message !== null) {
-      parsed = message as RawHostMessage
-    }
-
-    if (!parsed) {
-      return
-    }
-
-    const method = String(parsed.method ?? '')
-    if (method !== 'evenHubEvent') {
-      return
-    }
-
-    const data = (parsed.data ?? {}) as Record<string, unknown>
-    const dataType = data.type
-    const jsonData = (data.jsonData ?? data.data ?? {}) as Record<string, unknown>
-    const rawEventType =
-      jsonData.eventType ??
-      jsonData.event_type ??
-      jsonData.Event_Type ??
-      dataType
-
-    const label = eventLabel(normalizeEventType(rawEventType))
-    const suffix = label === 'Unknown' ? ` (${String(rawEventType ?? 'n/a')})` : ''
-    lastInput.setContent(`Last input: ${label}${suffix}`)
-    await page.render()
-  }
-
-  void waitForEvenAppBridge().then((bridge) => {
-    bridge.onEvenHubEvent((event) => {
-      void handleInputEvent(event)
+    console.log('[even] input event', {
+      label,
+      rawEventType,
+      event,
     })
-  })
 
-  // Keep the wrapper listener as a fallback path.
+    const suffix = label === 'Unknown' ? ` (${String(rawEventType ?? 'n/a')})` : ''
+    lastInput.setContent(`Last input: ${label}${suffix}`)
+    await page.render()
+  }
+
+  // Use SDK event listener for both simulator and device bridge events.
   sdk.addEventListener((event) => {
     void handleInputEvent(event)
   })
-
-  // Also listen to raw window events emitted by the bridge.
-  window.addEventListener('evenHubEvent', (event: Event) => {
-    const customEvent = event as CustomEvent<EvenHubEvent>
-    if (customEvent.detail) {
-      void handleInputEvent(customEvent.detail)
-    }
-  })
-
-  const w = window as Window & {
-    _listenEvenAppMessage?: (message: unknown) => void
-  }
-  const originalListenEvenAppMessage = w._listenEvenAppMessage
-  w._listenEvenAppMessage = (message: unknown) => {
-    void tryHandleRawHostMessage(message)
-
-    if (typeof originalListenEvenAppMessage === 'function') {
-      originalListenEvenAppMessage(message)
-    }
-  }
 
   return {
     mode: 'bridge',
@@ -213,21 +178,25 @@ function getBridgeClient(): EvenClient {
       await page.render()
     },
     async sendDemoAction() {
-      subtitle.setContent(`Action sent: ${new Date().toLocaleTimeString()}`)
+      subtitle.setContent(`${resolvedOptions.actionLabel}: ${new Date().toLocaleTimeString()}`)
       await page.render()
     },
   }
 }
 
-export async function initEven(timeoutMs = 4000): Promise<{ even: EvenClient }> {
+export async function initEven(
+  timeoutMs = 4000,
+  options?: EvenInitOptions,
+): Promise<{ even: EvenClient }> {
   try {
     await withTimeout(EvenBetterSdk.getRawBridge(), timeoutMs)
+    const clientKey = JSON.stringify(normalizeOptions(options))
 
-    if (!bridgeClient) {
-      bridgeClient = getBridgeClient()
+    if (!bridgeClients.has(clientKey)) {
+      bridgeClients.set(clientKey, getBridgeClient(options))
     }
 
-    return { even: bridgeClient }
+    return { even: bridgeClients.get(clientKey)! }
   } catch {
     return { even: getMockClient() }
   }
