@@ -302,6 +302,7 @@ This is a minimal example project intended for experimentation and learning. API
 [even-better-sdk](https://www.npmjs.com/package/@jappyjan/even-better-sdk)
 * Simulator: [evenhub-simulator](https://www.npmjs.com/package/@evenrealities/evenhub-simulator)
 * UIUX guideline: [link](https://www.figma.com/design/X82y5uJvqMH95jgOfmV34j/Even-Realities---Software-Design-Guidelines--Public-?node-id=2922-80782&t=ZIxZJDitnBnZJOwb-1)
+* Even Realities G2 – development [notes](https://github.com/nickustinov/even-g2-notes/blob/main/G2.md)
 
 
 ## GitHub Hints
