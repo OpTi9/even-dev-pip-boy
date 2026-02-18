@@ -63,7 +63,7 @@ function secureCompare(value: string, expected: string): boolean {
 function normalizeG2Text(value: string): string {
   return value
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
     .replace(/\r/g, '')
     .trim()
 }

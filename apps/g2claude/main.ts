@@ -168,10 +168,10 @@ function stateToStatusLine(): string {
 }
 
 function wrapLine(rawLine: string): string[] {
-  // G2 list rendering is more reliable with printable ASCII lines.
+  // Keep Unicode text (e.g., Cyrillic) but strip ANSI/control characters.
   const normalized = rawLine
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
 
   if (!normalized.trim()) {
     return []
@@ -224,7 +224,7 @@ function wrapLine(rawLine: string): string[] {
 function sanitizeDisplayText(text: string): string {
   return text
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
     .replace(/\r/g, '')
     .trim()
 }
