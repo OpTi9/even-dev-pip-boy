@@ -26,6 +26,41 @@ command_exists () {
   command -v "$1" >/dev/null 2>&1
 }
 
+resolve_app_location () {
+  local app_name="$1"
+
+  if [ -f "apps.json" ]; then
+    local configured_location
+    configured_location="$(
+      APP_LOOKUP_NAME="${app_name}" node -e "
+        const fs = require('fs');
+        const name = process.env.APP_LOOKUP_NAME;
+        const map = JSON.parse(fs.readFileSync('apps.json', 'utf8'));
+        const value = map[name];
+        if (typeof value === 'string' && value.length > 0) {
+          console.log(value);
+        }
+      " 2>/dev/null
+    )"
+    if [ -n "${configured_location}" ]; then
+      echo ".apps-cache: ${configured_location}"
+      return
+    fi
+  fi
+
+  if [ -d "apps/${app_name}" ]; then
+    echo "apps/${app_name}"
+    return
+  fi
+
+  if [ -n "${APP_NAME}" ] && [ -n "${APP_PATH}" ] && [ "${APP_NAME}" = "${app_name}" ]; then
+    echo "local:${APP_PATH}"
+    return
+  fi
+
+  echo "-"
+}
+
 discover_apps () {
   local apps=()
 
@@ -81,8 +116,11 @@ resolve_app_selection () {
   fi
 
   echo "Available apps:" >&2
+  printf "  %-4s %-20s %s\n" "ID" "NAME" "SOURCE" >&2
+  printf "  %-4s %-20s %s\n" "----" "--------------------" "----------------------------------------" >&2
   for i in "${!apps[@]}"; do
-    printf "  %d) %s\n" "$((i + 1))" "${apps[$i]}" >&2
+    app_location="$(resolve_app_location "${apps[$i]}")"
+    printf "  %-4s %-20s %s\n" "$((i + 1))" "${apps[$i]}" "${app_location}" >&2
   done
 
   read -r -p "Select app [1-${#apps[@]}] (default 1): " app_index >&2
