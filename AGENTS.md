@@ -33,7 +33,123 @@ This file is a practical build guide for this repository. It documents:
   - `/__open_editor` and `/__open_external` helpers
   - Stockfish asset serving for chess.
 
-## 2. App-by-App Analysis
+## 2. Even G2 Capability Reference (Hardware + SDK)
+
+This section is a practical capability baseline for building G2 apps in this repo.
+Source snapshot date: February 18, 2026.
+
+### Official hardware/display specs (Even G2)
+- Display tech: Micro LED, green display color.
+- Resolution: 640 x 350.
+- Field of view: 27.5 deg.
+- Refresh rate: 60 Hz.
+- Brightness: 1200 nits.
+- Optics: binocular waveguide display, 98% passthrough.
+- Connectivity: BLE 5.4.
+- Input surfaces: G2 temple touch controls and R1 ring touchpad.
+
+### Official control model (G2 + R1)
+- Single tap: confirm/select in lists; switch card view mode.
+- Double tap: dashboard/back behavior depending context.
+- Press and hold (~1s): menu.
+- Scroll up/down: navigate up/down.
+- Device/system combos: restart, regulatory info, silent mode shortcuts.
+
+### SDK UI coordinate space and limits (Even Hub SDK)
+- Logical canvas/coordinate range: x in [0..576], y in [0..288], origin at top-left.
+- Maximum containers per page: 4 total (across list + text + image).
+- Exactly one container should be event-capture (`isEventCapture: 1`), others `0`.
+- `containerName` max length: 16 chars.
+- Text content limits:
+  - startup text container content: up to 1000 chars
+  - `textContainerUpgrade` content: up to 2000 chars
+- List limits:
+  - up to 20 items per list
+  - item label up to 64 chars
+- Image container limits from SDK docs:
+  - width: 20..200
+  - height: 20..100
+  - some experimental simulator code in this repo uses larger image regions; treat official bounds as the hardware-safe contract.
+- Startup behavior:
+  - create page with `createStartUpPageContainer` once
+  - do subsequent layout updates with `rebuildPageContainer`
+  - image pixels are not carried by container creation alone; call `updateImageRawData` after create/rebuild.
+
+### Image format + render transport
+- `updateImageRawData.imageData` supports:
+  - `number[]` (recommended by SDK docs)
+  - `Uint8Array` / `ArrayBuffer` (SDK converts)
+  - base64 string
+- Repo examples:
+  - `chess`: 1-bit BMP/PNG byte payloads for compact transport.
+  - `stars`: base64 PNG updates from canvas.
+- SDK guidance: do not send image updates concurrently; queue one-at-a-time.
+
+### Event/control channels and event codes
+- Event channels:
+  - `textEvent`: primary path for scroll/swipe; also tap/double-tap.
+  - `sysEvent`: tap/double-tap and sometimes scroll.
+  - `listEvent`: list selection clicks (`currentSelectItemIndex`, `currentSelectItemName`).
+- OsEventTypeList mapping:
+  - `0`: click
+  - `1`: scroll top (up)
+  - `2`: scroll bottom (down)
+  - `3`: double click
+  - `4`: foreground enter
+  - `5`: foreground exit
+  - `6`: abnormal exit
+- Practical compatibility rule: `eventType === undefined` is often a click-equivalent.
+
+### Refresh rate and practical app render cadence
+- Hardware panel is 60 Hz, but app payload throughput is bridge/bandwidth constrained.
+- SDK explicitly warns to avoid high-frequency image pushes.
+- Repo-proven behavior:
+  - 5-10 FPS image update loops are common/stable targets.
+  - keep text updates independent via `textContainerUpgrade` (lighter than full page rebuild).
+  - use dirty-region updates and caching where possible.
+
+### Bandwidth budgeting (engineering estimates for this repo)
+
+No official end-to-end app payload throughput limit is published by Even. Use conservative budgeting:
+
+- Audio uplink payload (from SDK PCM contract):
+  - 40 bytes every 10 ms => ~4,000 bytes/s (~32 kbps) raw PCM bytes.
+- Example image payload math:
+  - 200 x 100 at 1-bit BMP: about 2,862 bytes/frame.
+    - 5 FPS: ~14.3 KB/s
+    - 10 FPS: ~28.6 KB/s
+    - base64 transport overhead (~33%) raises that further.
+  - 576 x 288 at 1-bit BMP: about 20,798 bytes/frame.
+    - 10 FPS: ~208 KB/s before protocol overhead (typically too aggressive for BLE-style real-time updates).
+
+Practical guidance:
+- Favor <=200x100 image containers (or tile into multiple containers).
+- Send one image update at a time (queued).
+- Target 2-10 FPS based on frame size/complexity.
+- Prefer text upgrades for high-frequency state feedback.
+
+### Recommended default profile for new G2 apps
+- Layout:
+  - up to 2 image containers at 200x100
+  - 1 active text container for event capture
+  - 1 text/status container
+- Loop:
+  - start with 100-200 ms image cadence
+  - back off cadence if updates queue up or latency appears
+- Input handling:
+  - process `textEvent`, `sysEvent`, `listEvent` in separate `if` blocks
+  - apply swipe throttle (~250-350 ms)
+  - dedupe click handling across channels
+
+### Primary sources
+- Even G2 product specs: `https://www.evenrealities.com/smart-glasses`
+- G2 controls: `https://support.evenrealities.com/hc/en-us/articles/13754911116047-How-to-Control`
+- R1 controls with G2 mapping: `https://support.evenrealities.com/hc/en-us/articles/13772400722063-How-to-Control`
+- SDK limits and API semantics (local package docs in this repo):
+  - `node_modules/@evenrealities/even_hub_sdk/README.md`
+  - `apps/stars/SDK_DOCUMENTATION.md`
+
+## 3. App-by-App Analysis
 
 ### `demo`
 - Functionality:
@@ -149,7 +265,7 @@ This file is a practical build guide for this repository. It documents:
     - `speech/` (target finding + model/API key flow),
     - `time/`, `explain/`, `ui/`.
 
-## 3. Build-Anything Playbook (In This Repo)
+## 4. Build-Anything Playbook (In This Repo)
 
 ### Choose one of these proven patterns
 - Pattern A: Simple action app (`demo`, `clock`)
@@ -197,7 +313,7 @@ This file is a practical build guide for this repository. It documents:
 - Ensure at least one capture container for interaction paths that need events.
 - Handle bridge absence explicitly; never assume simulator/device is always connected.
 
-## 4. Quick Start Templates
+## 5. Quick Start Templates
 
 ### Minimal new app skeleton
 - Copy `apps/demo/index.ts` and `apps/demo/main.ts`.
@@ -216,7 +332,7 @@ This file is a practical build guide for this repository. It documents:
 - Start from `apps/quicktest/main.ts`.
 - Keep runtime compile + rebuild pattern for iterative UI generation workflows.
 
-## 5. Practical Build Tips
+## 6. Practical Build Tips
 
 - Keep app-specific dependencies inside app folder only when needed (submodule style).
 - Put shared pure helpers in app-local files first; promote to `apps/_shared` only after reuse appears.
