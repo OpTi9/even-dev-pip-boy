@@ -9,6 +9,8 @@ This folder contains optional helper projects for development workflows.
 - Type: git submodule
 - Purpose: auxiliary UI helper project for even-dev (not part of `apps/*` runtime app selection)
 
+`misc/editor` is intentionally separate from the glasses runtime app list. Use it to generate UI source for `apps/quicktest`.
+
 Initialize/update all submodules from repository root:
 
 ```bash
@@ -38,7 +40,9 @@ From repository root, use this practical flow:
 ```
 
 2. In editor UI, create layout and copy the generated TypeScript.
-3. Replace `/Users/bnm/Documents/Development/even/even-dev/apps/quicktest/generated-ui.ts` with that generated code.
+3. Use one of these:
+   - Paste into quicktest textarea (`Quicktest source`) in the browser.
+   - Replace `apps/quicktest/generated-ui.ts` with generated source.
 4. Run simulator with quicktest:
 
 ```bash
@@ -49,7 +53,7 @@ APP_NAME=quicktest ./start-even.sh
 
 Notes:
 - The generated code should define `const container = new CreateStartUpPageContainer(...)`.
-- No extra export/wrapper is needed for `generated-ui.ts`.
+- `import ... from '@evenrealities/even_hub_sdk'` and `export default container` are supported; quicktest strips them before compiling.
 - After first render, clicking **Render Quicktest UI** rebuilds from current textarea content.
 - Bridge button/list events are logged in browser console (`[quicktest] bridge event`).
 - `quicktest` is intended for fast iteration; edit `generated-ui.ts`, refresh, and reconnect.

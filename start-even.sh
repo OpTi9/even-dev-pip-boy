@@ -11,6 +11,9 @@ SIM_HOST="${SIM_HOST:-127.0.0.1}"
 PORT="${PORT:-5173}"
 URL="${URL:-http://${SIM_HOST}:${PORT}}"
 APP_NAME="${APP_NAME:-}"
+APP_PATH="${APP_PATH:-}"
+AUDIO_DEVICE="${AUDIO_DEVICE:-}"
+SIM_OPTS="${SIM_OPTS:-}"
 CLI_APP_NAME="${1:-}"
 
 echo "Starting Even Hub development environment... ${URL}"
@@ -78,12 +81,64 @@ ensure_port_is_free () {
   fi
 }
 
-discover_apps () {
-  if [ ! -d "apps" ]; then
+resolve_app_location () {
+  local app_name="$1"
+
+  if [ -f "apps.json" ]; then
+    local configured_location
+    configured_location="$(
+      APP_LOOKUP_NAME="${app_name}" node -e "
+        const fs = require('fs');
+        const name = process.env.APP_LOOKUP_NAME;
+        const map = JSON.parse(fs.readFileSync('apps.json', 'utf8'));
+        const value = map[name];
+        if (typeof value === 'string' && value.length > 0) {
+          console.log(value);
+        }
+      " 2>/dev/null
+    )"
+    if [ -n "${configured_location}" ]; then
+      echo ".apps-cache: ${configured_location}"
+      return
+    fi
+  fi
+
+  if [ -d "apps/${app_name}" ]; then
+    echo "apps/${app_name}"
     return
   fi
 
-  find apps -mindepth 1 -maxdepth 1 -type d ! -name '_*' ! -name '.*' -exec basename {} \; | sort
+  if [ -n "${APP_NAME}" ] && [ -n "${APP_PATH}" ] && [ "${APP_NAME}" = "${app_name}" ]; then
+    echo "local:${APP_PATH}"
+    return
+  fi
+
+  echo "-"
+}
+
+discover_apps () {
+  local apps=()
+
+  # Built-in apps from apps/ directory
+  if [ -d "apps" ]; then
+    while IFS= read -r app; do
+      apps+=("$app")
+    done < <(find apps -mindepth 1 -maxdepth 1 -type d ! -name '_*' ! -name '.*' -exec basename {} \;)
+  fi
+
+  # External apps from apps.json
+  if [ -f "apps.json" ]; then
+    while IFS= read -r app; do
+      apps+=("$app")
+    done < <(node -e "Object.keys(JSON.parse(require('fs').readFileSync('apps.json','utf8'))).forEach(k=>console.log(k))")
+  fi
+
+  # APP_PATH override adds to the list too
+  if [ -n "${APP_NAME}" ] && [ -n "${APP_PATH}" ]; then
+    apps+=("${APP_NAME}")
+  fi
+
+  printf '%s\n' "${apps[@]}" | sort -u
 }
 
 resolve_app_selection () {
@@ -105,7 +160,7 @@ resolve_app_selection () {
       fi
     done
 
-    echo "APP_NAME '${APP_NAME}' does not exist under ./apps." >&2
+    echo "APP_NAME '${APP_NAME}' not found in built-in apps or apps.json." >&2
     echo "Available apps: ${apps[*]}" >&2
     exit 1
   fi
@@ -116,8 +171,11 @@ resolve_app_selection () {
   fi
 
   echo "Available apps:" >&2
+  printf "  %-4s %-20s %s\n" "ID" "NAME" "SOURCE" >&2
+  printf "  %-4s %-20s %s\n" "----" "--------------------" "----------------------------------------" >&2
   for i in "${!apps[@]}"; do
-    printf "  %d) %s\n" "$((i + 1))" "${apps[$i]}" >&2
+    app_location="$(resolve_app_location "${apps[$i]}")"
+    printf "  %-4s %-20s %s\n" "$((i + 1))" "${apps[$i]}" "${app_location}" >&2
   done
 
   read -r -p "Select app [1-${#apps[@]}] (default 1): " app_index >&2
@@ -175,21 +233,67 @@ if [ -n "${CLI_APP_NAME}" ]; then
   APP_NAME="${CLI_APP_NAME}"
 fi
 
-SELECTED_APP="$(resolve_app_selection)"
-echo "Selected app: ${SELECTED_APP}"
-
 # --------------------------------------------------
-# Ensure selected app dependencies installed (if needed)
+# APP_PATH shortcut: point to a local directory, skip selection
 # --------------------------------------------------
 
-if [ -f "apps/${SELECTED_APP}/package.json" ] && [ ! -d "apps/${SELECTED_APP}/node_modules" ]; then
-  echo "Installing dependencies for apps/${SELECTED_APP}..."
-  npm --prefix "apps/${SELECTED_APP}" install
+if [ -n "${APP_PATH}" ]; then
+  RESOLVED_APP_PATH="$(cd "${APP_PATH}" && pwd)"
+  if [ -z "${APP_NAME}" ]; then
+    APP_NAME="$(basename "${RESOLVED_APP_PATH}")"
+  fi
+  SELECTED_APP="${APP_NAME}"
+  echo "Selected app: ${SELECTED_APP} (from APP_PATH=${APP_PATH})"
+
+  if [ -f "${RESOLVED_APP_PATH}/package.json" ] && [ ! -d "${RESOLVED_APP_PATH}/node_modules" ]; then
+    echo "Installing dependencies for ${RESOLVED_APP_PATH}..."
+    npm --prefix "${RESOLVED_APP_PATH}" install
+  fi
+else
+  RESOLVED_APP_PATH=""
+  SELECTED_APP="$(resolve_app_selection)"
+  echo "Selected app: ${SELECTED_APP}"
+
+  # --------------------------------------------------
+  # Clone selected app from apps.json if it's a git URL
+  # --------------------------------------------------
+
+  if [ -f "apps.json" ]; then
+    APP_URL="$(node -e "
+      const r = JSON.parse(require('fs').readFileSync('apps.json','utf8'));
+      const v = r['${SELECTED_APP}'] || '';
+      const base = v.split('#')[0];
+      if (base.startsWith('https://') || base.startsWith('git@')) console.log(base);
+    ")"
+    if [ -n "${APP_URL}" ]; then
+      CACHE_DIR=".apps-cache/${SELECTED_APP}"
+      if [ ! -d "${CACHE_DIR}" ]; then
+        echo "Cloning ${SELECTED_APP} from ${APP_URL}..."
+        git clone "${APP_URL}" "${CACHE_DIR}"
+      fi
+    fi
+  fi
+
+  # --------------------------------------------------
+  # Ensure selected app dependencies installed (if needed)
+  # --------------------------------------------------
+
+  APP_DIR=""
+  if [ -d "apps/${SELECTED_APP}" ]; then
+    APP_DIR="apps/${SELECTED_APP}"
+  elif [ -d ".apps-cache/${SELECTED_APP}" ]; then
+    APP_DIR=".apps-cache/${SELECTED_APP}"
+  fi
+
+  if [ -n "${APP_DIR}" ] && [ -f "${APP_DIR}/package.json" ] && [ ! -d "${APP_DIR}/node_modules" ]; then
+    echo "Installing dependencies for ${APP_DIR}..."
+    npm --prefix "${APP_DIR}" install
+  fi
 fi
 
 ensure_port_is_free "${PORT}"
 
-VITE_APP_NAME="${SELECTED_APP}" npx vite --host "${VITE_HOST}" --port "${PORT}" --strictPort &
+VITE_APP_NAME="${SELECTED_APP}" APP_NAME="${SELECTED_APP}" APP_PATH="${RESOLVED_APP_PATH}" npx vite --host "${VITE_HOST}" --port "${PORT}" --strictPort &
 
 VITE_PID=$!
 
@@ -217,8 +321,16 @@ echo "Vite is ready."
 # --------------------------------------------------
 
 echo "Launching Even Hub Simulator..."
+
+SIM_ARGS=("${URL}")
+if [ -n "${AUDIO_DEVICE}" ]; then
+  SIM_ARGS+=("--aid" "${AUDIO_DEVICE}")
+fi
+# shellcheck disable=SC2206
+SIM_ARGS+=(${SIM_OPTS})
+
 if command_exists evenhub-simulator; then
-  evenhub-simulator "${URL}"
+  evenhub-simulator "${SIM_ARGS[@]}"
 else
-  npx @evenrealities/evenhub-simulator "${URL}"
+  npx @evenrealities/evenhub-simulator "${SIM_ARGS[@]}"
 fi
