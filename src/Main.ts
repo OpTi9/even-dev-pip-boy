@@ -39,6 +39,11 @@ const submoduleAdapters: SubmoduleAdapter[] = [
     marker: import.meta.glob('../apps/chess/package.json'),
     load: () => import('./chess-submodule-adapter') as Promise<AppModuleShape>,
   },
+  {
+    id: 'weather',
+    marker: import.meta.glob('../apps/weather/package.json'),
+    load: () => import('./weather-submodule-adapter') as Promise<AppModuleShape>,
+  },
 ]
 
 function extractAppName(modulePath: string): string {

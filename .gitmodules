@@ -16,3 +16,6 @@
 [submodule "apps/chess"]
 	path = apps/chess
 	url = https://github.com/dmyster145/EvenChess
+[submodule "apps/weather"]
+	path = apps/weather
+	url = https://github.com/nickustinov/weather-even-g2.git
