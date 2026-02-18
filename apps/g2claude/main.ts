@@ -21,6 +21,7 @@ type G2ClaudeClient = {
 }
 
 const MAX_WRAP_CHARS = 45
+const MAX_ITEM_CHARS = 64
 const MAX_LIST_ITEMS = 20
 const DISPLAY_WINDOW_LINES = 10
 const POLL_INTERVAL_MS = 2000
@@ -167,11 +168,16 @@ function stateToStatusLine(): string {
 }
 
 function wrapLine(rawLine: string): string[] {
-  if (!rawLine.trim()) {
-    return ['']
+  // G2 list rendering is more reliable with printable ASCII lines.
+  const normalized = rawLine
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+
+  if (!normalized.trim()) {
+    return []
   }
 
-  const words = rawLine.trim().split(/\s+/)
+  const words = normalized.trim().split(/\s+/)
   const lines: string[] = []
   let current = ''
 
@@ -215,8 +221,16 @@ function wrapLine(rawLine: string): string[] {
   return lines
 }
 
+function sanitizeDisplayText(text: string): string {
+  return text
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/\r/g, '')
+    .trim()
+}
+
 function wrapText(text: string): string[] {
-  const source = text.replace(/\r/g, '')
+  const source = sanitizeDisplayText(text)
   const rows = source.split('\n')
   const wrapped: string[] = []
 
@@ -248,7 +262,12 @@ function getVisibleLines(): string[] {
     return ['(no response)']
   }
 
-  return page.slice(0, MAX_LIST_ITEMS)
+  return page
+    .slice(0, MAX_LIST_ITEMS)
+    .map((line) => {
+      const safe = line.trim().slice(0, MAX_ITEM_CHARS)
+      return safe || '-'
+    })
 }
 
 async function renderPage(bridge: EvenAppBridge): Promise<void> {
@@ -457,9 +476,14 @@ function startPolling(bridge: EvenAppBridge, setStatus: SetStatus): void {
           return
         }
 
+        const safeText = sanitizeDisplayText(body.text)
+        if (!safeText) {
+          return
+        }
+
         stopPolling()
-        state.responseText = body.text
-        state.wrappedLines = wrapText(body.text)
+        state.responseText = safeText
+        state.wrappedLines = wrapText(safeText)
         state.scrollOffset = 0
         setViewState('displaying')
 

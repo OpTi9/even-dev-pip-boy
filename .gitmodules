@@ -16,3 +16,6 @@
 [submodule "apps/chess"]
 	path = apps/chess
 	url = https://github.com/dmyster145/EvenChess
+[submodule "services/claude-code-telegram"]
+	path = services/claude-code-telegram
+	url = https://github.com/OpTi9/claude-code-telegram.git

@@ -60,6 +60,14 @@ function secureCompare(value: string, expected: string): boolean {
   return timingSafeEqual(valueBytes, expectedBytes)
 }
 
+function normalizeG2Text(value: string): string {
+  return value
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ' ')
+    .replace(/\r/g, '')
+    .trim()
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const allowedHosts = (env.VITE_ALLOWED_HOSTS ?? process.env.VITE_ALLOWED_HOSTS ?? '')
@@ -303,7 +311,7 @@ export default defineConfig(({ mode }) => {
           }
 
           const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : ''
-          const text = typeof payload.text === 'string' ? payload.text.trim() : ''
+          const text = typeof payload.text === 'string' ? normalizeG2Text(payload.text) : ''
           if (!sessionId || !text) {
             sendText(res, 400, 'Missing required fields: sessionId, text')
             return

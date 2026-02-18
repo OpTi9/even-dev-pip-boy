@@ -25,6 +25,17 @@ This file is a practical build guide for this repository. It documents:
   - ensures dependencies,
   - starts Vite with `VITE_APP_NAME=<selected_app>`,
   - launches Even Hub simulator.
+- `start-g2-stack.sh` (new full-stack runner):
+  - starts `g2claude` Vite app (fixed port + strictPort),
+  - starts `claude-code-telegram` bot from subrepo,
+  - aligns bot callback URL to localhost (`EVEN_G2_URL=http://127.0.0.1:<port>`),
+  - prints/generates QR for Tailscale host URL.
+- npm shortcuts:
+  - `npm run g2:up`
+  - `npm run g2:down`
+  - `npm run g2:status`
+  - `npm run g2:qr`
+  - `npm run g2:logs`
 
 ### Dev server middleware
 - `vite.config.ts` adds utilities used by apps:
@@ -228,6 +239,14 @@ Practical guidance:
     - tap start/stop listening
     - double-tap reset
     - scroll up/down paginate response lines
+
+### `services/claude-code-telegram` (subrepo)
+- Purpose:
+  - colocated bot backend for G2 voice prompt execution and callback delivery.
+- Notes:
+  - tracked as a git submodule in `.gitmodules`.
+  - default URL points to `https://github.com/OpTi9/claude-code-telegram.git`.
+  - one-line stack startup now uses this subrepo path by default.
 
 ### `chess` (submodule)
 - Functionality:

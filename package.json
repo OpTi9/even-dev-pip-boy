@@ -7,7 +7,13 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "preview": "vite preview",
-    "start-even": "./start-even.sh"
+    "start-even": "./start-even.sh",
+    "g2:up": "./start-g2-stack.sh up",
+    "g2:up:noqr": "./start-g2-stack.sh up --no-qr",
+    "g2:down": "./start-g2-stack.sh down",
+    "g2:status": "./start-g2-stack.sh status",
+    "g2:qr": "./start-g2-stack.sh qr",
+    "g2:logs": "./start-g2-stack.sh logs"
   },
   "keywords": [],
   "author": "",
