@@ -32,6 +32,14 @@ This file is a practical build guide for this repository. It documents:
   - `/reddit-api` and `/__reddit_proxy` for Reddit fetches
   - `/__open_editor` and `/__open_external` helpers
   - Stockfish asset serving for chess.
+  - G2 Claude bridge endpoints:
+    - `/__g2_session` (session/token bootstrap)
+    - `/__groq_transcribe` (audio transcription proxy)
+    - `/__g2_send` (forward prompt to bot webhook)
+    - `/__g2_receive` (bot callback back into Vite)
+    - `/__g2_poll` (app-side response polling)
+  - Host validation in Vite must allow your external host (for example Tailscale)
+    via `server.allowedHosts` / `VITE_ALLOWED_HOSTS`.
 
 ## 2. Even G2 Capability Reference (Hardware + SDK)
 
@@ -203,6 +211,24 @@ Practical guidance:
   - first render uses `createStartUpPageContainer`; rerenders use `rebuildPageContainer`
   - includes editor helper link backed by `/__open_editor`
 
+### `g2claude`
+- Functionality:
+  - voice prompt from G2 glasses mic to Claude
+  - response rendered back on glasses, with scrollable pagination
+  - optional mirror to Telegram (configured in bot repo)
+- How it's built:
+  - session/token bootstrap through `/__g2_session`
+  - real-device audio capture uses SDK mic APIs:
+    - `bridge.audioControl(true/false)` to open/close mic
+    - `event.audioEvent.audioPcm` stream for PCM chunks
+  - PCM is wrapped as 16 kHz / 16-bit mono WAV before `/__groq_transcribe`
+  - transcript forwarded via `/__g2_send`; response awaited via `/__g2_poll`
+  - bot posts final answer to `/__g2_receive` (Bearer auth via `EVEN_G2_BRIDGE_SECRET`)
+  - ring controls:
+    - tap start/stop listening
+    - double-tap reset
+    - scroll up/down paginate response lines
+
 ### `chess` (submodule)
 - Functionality:
   - full chess app with multiple modes (AI play, bullet, academy drills)
@@ -306,6 +332,19 @@ Practical guidance:
 - Use server-side proxy middleware for third-party HTTP in dev (`vite.config.ts`).
 - Wrap requests with timeout + retry for unstable APIs.
 - Cache expensive responses (bridge local storage is useful for on-device persistence).
+
+### Real-device networking rules (G2 + Tailscale)
+- Use Tailscale host only for device/browser entry URL + QR.
+  - Example: `http://<tailscale-host>:5174/`
+- If bot and Vite run on the same machine, set bot callback URL to localhost:
+  - `EVEN_G2_URL=http://127.0.0.1:<vite-port>`
+  - This avoids callback failures caused by local DNS/network path differences.
+- Keep one fixed Vite port in active runs (`--strictPort`) and align:
+  - QR URL port
+  - `EVEN_G2_URL` port in bot `.env`
+  - Vite `G2_BOT_PORT` target for `/__g2_send`
+- For server-side middleware secrets/ports, prefer env loaded via Vite `loadEnv(...)`
+  (not raw `process.env` only), so `.env.local` values are honored reliably.
 
 ### SDK-specific safety checks
 - Instantiate SDK classes (`new TextContainerProperty(...)`), do not pass plain object types where class instances are expected.
