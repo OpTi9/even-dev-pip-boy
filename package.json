@@ -30,6 +30,7 @@
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "@evenrealities/evenhub-simulator": "^0.1.2",
     "vite": "^7.3.1"
   }
 }

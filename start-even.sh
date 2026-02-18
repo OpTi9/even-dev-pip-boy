@@ -23,6 +23,61 @@ command_exists () {
   command -v "$1" >/dev/null 2>&1
 }
 
+find_listening_pids () {
+  local port="$1"
+
+  if command_exists lsof; then
+    lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true
+    return
+  fi
+
+  if command_exists fuser; then
+    fuser -n tcp "${port}" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' || true
+    return
+  fi
+
+  if command_exists ss; then
+    ss -ltnp "sport = :${port}" 2>/dev/null | awk -F'pid=' 'NR > 1 && $2 { split($2, parts, ","); print parts[1] }' | sed '/^$/d' || true
+  fi
+}
+
+ensure_port_is_free () {
+  local port="$1"
+  local pids=()
+  local lingering=()
+
+  while IFS= read -r pid; do
+    if [ -n "${pid}" ]; then
+      pids+=("${pid}")
+    fi
+  done < <(find_listening_pids "${port}")
+
+  if [ "${#pids[@]}" -eq 0 ]; then
+    if curl --output /dev/null --silent --head --fail "${URL}"; then
+      echo "A server is already reachable at ${URL}, but its process could not be detected." >&2
+      echo "Stop the existing server manually or launch with a different port (example: PORT=5174 ./start-even.sh)." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  echo "Port ${port} is already in use. Stopping existing process(es): ${pids[*]}"
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep 1
+
+  while IFS= read -r pid; do
+    if [ -n "${pid}" ]; then
+      lingering+=("${pid}")
+    fi
+  done < <(find_listening_pids "${port}")
+
+  if [ "${#lingering[@]}" -gt 0 ]; then
+    echo "Port ${port} is still in use by: ${lingering[*]}" >&2
+    echo "Stop those processes manually or launch with a different port (example: PORT=5174 ./start-even.sh)." >&2
+    exit 1
+  fi
+}
+
 discover_apps () {
   if [ ! -d "apps" ]; then
     return
@@ -132,11 +187,13 @@ if [ -f "apps/${SELECTED_APP}/package.json" ] && [ ! -d "apps/${SELECTED_APP}/no
   npm --prefix "apps/${SELECTED_APP}" install
 fi
 
-VITE_APP_NAME="${SELECTED_APP}" npx vite --host "${VITE_HOST}" --port "${PORT}" &
+ensure_port_is_free "${PORT}"
+
+VITE_APP_NAME="${SELECTED_APP}" npx vite --host "${VITE_HOST}" --port "${PORT}" --strictPort &
 
 VITE_PID=$!
 
-trap "kill ${VITE_PID}" EXIT
+trap 'kill "${VITE_PID}" 2>/dev/null || true' EXIT
 
 # --------------------------------------------------
 # Wait for server to be reachable
@@ -145,6 +202,11 @@ trap "kill ${VITE_PID}" EXIT
 echo "Waiting for Vite server..."
 
 until curl --output /dev/null --silent --head --fail "$URL"; do
+  if ! kill -0 "${VITE_PID}" 2>/dev/null; then
+    wait "${VITE_PID}" 2>/dev/null || true
+    echo "Vite dev server exited before becoming reachable at ${URL}." >&2
+    exit 1
+  fi
   sleep 1
 done
 
