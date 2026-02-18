@@ -3,6 +3,7 @@ import type { PluginContext } from './types'
 import appServer from './app-server'
 import browserLauncher from './browser-launcher'
 import chessStockfish from './chess-stockfish'
+import gutenbergProxy from './gutenberg-proxy'
 import redditProxy from './reddit-proxy'
 import restapiProxy from './restapi-proxy'
 
@@ -11,6 +12,7 @@ export function loadAppPlugins(ctx: PluginContext): Plugin[] {
     appServer(ctx),
     browserLauncher(),
     chessStockfish(ctx),
+    gutenbergProxy(),
     redditProxy(),
     restapiProxy(),
   ].filter((p): p is Plugin => p !== null)

@@ -12,6 +12,8 @@ PORT="${PORT:-5173}"
 URL="${URL:-http://${SIM_HOST}:${PORT}}"
 APP_NAME="${APP_NAME:-}"
 APP_PATH="${APP_PATH:-}"
+AUDIO_DEVICE="${AUDIO_DEVICE:-}"
+SIM_OPTS="${SIM_OPTS:-}"
 CLI_APP_NAME="${1:-}"
 
 echo "Starting Even Hub development environment... ${URL}"
@@ -219,8 +221,16 @@ echo "Vite is ready."
 # --------------------------------------------------
 
 echo "Launching Even Hub Simulator..."
+
+SIM_ARGS=("${URL}")
+if [ -n "${AUDIO_DEVICE}" ]; then
+  SIM_ARGS+=("--aid" "${AUDIO_DEVICE}")
+fi
+# shellcheck disable=SC2206
+SIM_ARGS+=(${SIM_OPTS})
+
 if command_exists evenhub-simulator; then
-  evenhub-simulator "${URL}"
+  evenhub-simulator "${SIM_ARGS[@]}"
 else
-  npx @evenrealities/evenhub-simulator "${URL}"
+  npx @evenrealities/evenhub-simulator "${SIM_ARGS[@]}"
 fi
