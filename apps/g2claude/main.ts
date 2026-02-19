@@ -417,7 +417,12 @@ async function refreshChangedFiles(bridge: EvenAppBridge): Promise<void> {
       }
     }
 
-    await renderPage(bridge)
+    try {
+      await renderPage(bridge)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      appendEventLog(`G2 Claude: changed-files refresh render skipped (${message})`)
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     appendEventLog(`G2 Claude: could not read git changes (${message})`)
@@ -985,7 +990,10 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
         } catch {
           const result = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
           if (!isRebuildSuccess(result)) {
-            throw new Error(`rebuildPageContainer failed after text upgrade fallback (${String(result)})`)
+            appendEventLog(
+              `G2 Claude: text rebuild fallback failed (${String(result)}); keeping previous frame`,
+            )
+            break
           }
         }
       }
