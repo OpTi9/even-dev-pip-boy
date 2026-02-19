@@ -1,7 +1,8 @@
 // vite.config.ts
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineConfig, loadEnv } from 'vite'
 import type { Alias, Plugin } from 'vite'
@@ -68,11 +69,103 @@ function normalizeG2Text(value: string): string {
     .trim()
 }
 
+type GitRunResult = {
+  status: number | null
+  stdout: string
+  stderr: string
+}
+
+type GitChangedFile = {
+  path: string
+  status: string
+}
+
+function runGit(cwd: string, args: string[]): GitRunResult {
+  const result = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+  })
+
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  }
+}
+
+function resolveWorkingDirectory(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return resolve(fallback)
+  }
+  return resolve(raw.trim())
+}
+
+function isDirectory(pathValue: string): boolean {
+  if (!existsSync(pathValue)) {
+    return false
+  }
+  try {
+    return statSync(pathValue).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function parseGitChangedFiles(stdout: string): GitChangedFile[] {
+  const lines = stdout.split('\n')
+  const files: GitChangedFile[] = []
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd()
+    if (!line) {
+      continue
+    }
+
+    const statusToken = line.slice(0, 2)
+    const status = statusToken.trim() || statusToken
+    let filePath = line.slice(3).trim()
+    if (!filePath) {
+      continue
+    }
+
+    const renameArrow = ' -> '
+    const renameAt = filePath.lastIndexOf(renameArrow)
+    if (renameAt >= 0) {
+      filePath = filePath.slice(renameAt + renameArrow.length)
+    }
+
+    if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length >= 2) {
+      filePath = filePath.slice(1, -1)
+    }
+
+    files.push({
+      path: filePath,
+      status,
+    })
+  }
+
+  files.sort((a, b) => a.path.localeCompare(b.path))
+  return files
+}
+
+function isInsideDirectory(rootDir: string, targetPath: string): boolean {
+  const rel = relative(rootDir, targetPath)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function trimDiffOutput(value: string): string {
+  return value.trim() ? value : ''
+}
+
 function g2BridgePlugin(env: Record<string, string>): Plugin {
   return {
     name: 'g2-bridge',
     configureServer(server) {
       const g2Sessions = new Map<string, G2SessionRecord>()
+      const defaultWorkingDirectory = (
+        env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
+        process.env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
+        '/home/aza/Desktop'
+      )
 
       const cleanupTimer = setInterval(() => {
         const cutoff = Date.now() - G2_SESSION_TTL_MS
@@ -90,11 +183,6 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
           return
         }
 
-        const defaultWorkingDirectory = (
-          env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
-          process.env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
-          '/home/aza/Desktop'
-        )
         const sessionId = randomUUID()
         const sessionToken = randomBytes(24).toString('hex')
         g2Sessions.set(sessionId, {
@@ -312,6 +400,145 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
         session.lastSeenAt = Date.now()
         const text = session.responses.shift() ?? null
         sendJson(res, 200, { text })
+      })
+
+      server.middlewares.use('/__g2_changes', async (req, res) => {
+        if (req.method !== 'POST') {
+          sendText(res, 405, 'Method Not Allowed')
+          return
+        }
+
+        try {
+          const rawBody = await readRequestBody(req)
+          const payload = JSON.parse(rawBody.toString('utf-8')) as {
+            workingDirectory?: unknown
+          }
+          const workingDirectory = resolveWorkingDirectory(
+            payload.workingDirectory,
+            defaultWorkingDirectory,
+          )
+
+          if (!isDirectory(workingDirectory)) {
+            sendText(res, 400, `Working directory does not exist: ${workingDirectory}`)
+            return
+          }
+
+          const statusResult = runGit(workingDirectory, [
+            '-c',
+            'core.quotepath=false',
+            'status',
+            '--porcelain',
+            '--untracked-files=all',
+            '--',
+            '.',
+          ])
+
+          if (statusResult.status !== 0) {
+            if (statusResult.stderr.toLowerCase().includes('not a git repository')) {
+              sendJson(res, 200, { files: [] })
+              return
+            }
+            sendText(
+              res,
+              500,
+              `git status failed: ${statusResult.stderr || `exit ${String(statusResult.status)}`}`,
+            )
+            return
+          }
+
+          const files = parseGitChangedFiles(statusResult.stdout)
+          sendJson(res, 200, { files })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          sendText(res, 400, `Invalid JSON payload: ${message}`)
+        }
+      })
+
+      server.middlewares.use('/__g2_diff', async (req, res) => {
+        if (req.method !== 'POST') {
+          sendText(res, 405, 'Method Not Allowed')
+          return
+        }
+
+        try {
+          const rawBody = await readRequestBody(req)
+          const payload = JSON.parse(rawBody.toString('utf-8')) as {
+            workingDirectory?: unknown
+            path?: unknown
+          }
+          const workingDirectory = resolveWorkingDirectory(
+            payload.workingDirectory,
+            defaultWorkingDirectory,
+          )
+          const requestedPath = typeof payload.path === 'string' ? payload.path.trim() : ''
+
+          if (!isDirectory(workingDirectory)) {
+            sendText(res, 400, `Working directory does not exist: ${workingDirectory}`)
+            return
+          }
+
+          if (!requestedPath) {
+            sendText(res, 400, 'Missing required field: path')
+            return
+          }
+
+          const resolvedPath = resolve(workingDirectory, requestedPath)
+          if (!isInsideDirectory(workingDirectory, resolvedPath)) {
+            sendText(res, 400, 'Requested file path is outside working directory')
+            return
+          }
+          const gitPath = relative(workingDirectory, resolvedPath) || '.'
+
+          const repoCheck = runGit(workingDirectory, ['rev-parse', '--is-inside-work-tree'])
+          if (repoCheck.status !== 0) {
+            sendJson(res, 200, {
+              path: requestedPath,
+              diff: '(Working directory is not a git repository)',
+            })
+            return
+          }
+
+          const unstaged = runGit(workingDirectory, [
+            '-c',
+            'core.quotepath=false',
+            'diff',
+            '--',
+            gitPath,
+          ])
+          const staged = runGit(workingDirectory, [
+            '-c',
+            'core.quotepath=false',
+            'diff',
+            '--cached',
+            '--',
+            gitPath,
+          ])
+
+          let diff = trimDiffOutput(`${unstaged.stdout}\n${staged.stdout}`.trim())
+
+          if (!diff && existsSync(resolvedPath)) {
+            const untrackedDiff = runGit(workingDirectory, [
+              '-c',
+              'core.quotepath=false',
+              'diff',
+              '--no-index',
+              '--',
+              '/dev/null',
+              gitPath,
+            ])
+            if (untrackedDiff.status === 0 || untrackedDiff.status === 1) {
+              diff = trimDiffOutput(untrackedDiff.stdout)
+            }
+          }
+
+          sendJson(res, 200, {
+            path: requestedPath,
+            diff: diff || '(No textual diff available)',
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          sendText(res, 400, `Invalid JSON payload: ${message}`)
+        }
       })
     },
   }

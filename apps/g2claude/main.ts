@@ -1,5 +1,7 @@
 import {
   CreateStartUpPageContainer,
+  ListContainerProperty,
+  ListItemContainerProperty,
   OsEventTypeList,
   RebuildPageContainer,
   TextContainerUpgrade,
@@ -22,6 +24,13 @@ type G2ClaudeClient = {
 type ConversationTurn = {
   prompt: string
   response: string
+}
+
+type UiScreen = 'root' | 'changes' | 'diff'
+
+type ChangedFile = {
+  path: string
+  status: string
 }
 
 const MAX_WRAP_CHARS = 45
@@ -56,12 +65,17 @@ const SCROLL_THUMB_CHAR = '•'
 const WORKDIR_INPUT_ID = 'g2-workdir-input'
 const WORKDIR_CONTAINER_ID = 'g2-workdir-controls'
 const FALLBACK_WORKING_DIRECTORY = '/home/aza/Desktop'
+const SHOW_CHANGES_LINE = '[ Show changes ]'
 const TITLE_CONTAINER_ID = 1
 const BODY_CONTAINER_ID = 2
 const SCROLL_CONTAINER_ID = 3
 const TITLE_CONTAINER_NAME = 'g2-title'
 const BODY_CONTAINER_NAME = 'g2-body'
 const SCROLL_CONTAINER_NAME = 'g2-scroll'
+const CHANGES_STATUS_CONTAINER_ID = 2
+const CHANGES_LIST_CONTAINER_ID = 3
+const CHANGES_STATUS_CONTAINER_NAME = 'g2-chg-st'
+const CHANGES_LIST_CONTAINER_NAME = 'g2-chg-list'
 
 class HttpStatusError extends Error {
   status: number
@@ -91,7 +105,9 @@ const state: {
   sessionToken: string | null
   defaultWorkingDirectory: string
   workingDirectory: string
+  screen: UiScreen
   scrollOffset: number
+  diffScrollOffset: number
   micOpen: boolean
   pcmAudioChunks: Uint8Array[]
   pcmAudioBytes: number
@@ -102,6 +118,10 @@ const state: {
   activeRequestId: string | null
   pendingPrompt: string | null
   conversationHistory: ConversationTurn[]
+  changedFiles: ChangedFile[]
+  changesSelectedIndex: number
+  diffFilePath: string
+  diffContent: string
   currentPrompt: string
   currentResponse: string
   streamingText: string
@@ -117,6 +137,7 @@ const state: {
   renderedTitle: string
   renderedBody: string
   renderedScrollbar: string
+  renderLayout: 'text' | 'list' | null
   busy: boolean
 } = {
   bridge: null,
@@ -129,7 +150,9 @@ const state: {
   sessionToken: null,
   defaultWorkingDirectory: FALLBACK_WORKING_DIRECTORY,
   workingDirectory: FALLBACK_WORKING_DIRECTORY,
+  screen: 'root',
   scrollOffset: 0,
+  diffScrollOffset: 0,
   micOpen: false,
   pcmAudioChunks: [],
   pcmAudioBytes: 0,
@@ -140,6 +163,10 @@ const state: {
   activeRequestId: null,
   pendingPrompt: null,
   conversationHistory: [],
+  changedFiles: [],
+  changesSelectedIndex: 0,
+  diffFilePath: '',
+  diffContent: '',
   currentPrompt: '',
   currentResponse: '',
   streamingText: '',
@@ -155,6 +182,7 @@ const state: {
   renderedTitle: '',
   renderedBody: '',
   renderedScrollbar: '',
+  renderLayout: null,
   busy: false,
 }
 
@@ -291,6 +319,161 @@ function ensureWorkingDirectoryControls(): void {
   }
 }
 
+function normalizeChangedFilePath(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    return ''
+  }
+
+  const value = raw.trim()
+  return value
+}
+
+function normalizeChangedFileStatus(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    return ''
+  }
+  return raw.trim()
+}
+
+async function fetchChangedFilesForCurrentDirectory(): Promise<ChangedFile[]> {
+  updateWorkingDirectoryFromInput()
+
+  const response = await fetch('/__g2_changes', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      workingDirectory: state.workingDirectory,
+    }),
+  })
+
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(message || `Failed to load changed files (${response.status})`)
+  }
+
+  const body = (await response.json()) as { files?: unknown }
+  if (!Array.isArray(body.files)) {
+    return []
+  }
+
+  const files: ChangedFile[] = []
+  for (const entry of body.files) {
+    if (!entry || typeof entry !== 'object') {
+      continue
+    }
+    const record = entry as Record<string, unknown>
+    const path = normalizeChangedFilePath(record.path)
+    if (!path) {
+      continue
+    }
+    files.push({
+      path,
+      status: normalizeChangedFileStatus(record.status),
+    })
+  }
+
+  return files
+}
+
+async function fetchFileDiffForCurrentDirectory(path: string): Promise<string> {
+  updateWorkingDirectoryFromInput()
+
+  const response = await fetch('/__g2_diff', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      workingDirectory: state.workingDirectory,
+      path,
+    }),
+  })
+
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(message || `Failed to load file diff (${response.status})`)
+  }
+
+  const body = (await response.json()) as { diff?: unknown }
+  const diff = typeof body.diff === 'string' ? body.diff : ''
+  return sanitizeDisplayText(diff) || '(No textual diff available)'
+}
+
+async function refreshChangedFiles(bridge: EvenAppBridge): Promise<void> {
+  try {
+    const files = await fetchChangedFilesForCurrentDirectory()
+    state.changedFiles = files
+    state.changesSelectedIndex = clampIndex(state.changesSelectedIndex, getVisibleChangedFiles().length)
+
+    if (state.screen === 'changes' && state.changedFiles.length === 0) {
+      state.screen = 'root'
+    }
+    if (state.screen === 'diff') {
+      const stillExists = state.changedFiles.some((file) => file.path === state.diffFilePath)
+      if (!stillExists) {
+        state.screen = 'root'
+        state.diffFilePath = ''
+        state.diffContent = ''
+        state.diffScrollOffset = 0
+      }
+    }
+
+    await renderPage(bridge)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    appendEventLog(`G2 Claude: could not read git changes (${message})`)
+  }
+}
+
+function toChangeListLabel(file: ChangedFile): string {
+  const prefix = file.status ? `[${file.status}] ` : ''
+  const full = `${prefix}${file.path}`
+  if (full.length <= 64) {
+    return full
+  }
+  return `${full.slice(0, 61)}...`
+}
+
+function getVisibleChangedFiles(): ChangedFile[] {
+  return state.changedFiles.slice(0, 20)
+}
+
+function buildDiffLines(): string[] {
+  return wrapText(state.diffContent || '(No textual diff available)')
+}
+
+function canOpenChangesFromRoot(): boolean {
+  return state.screen === 'root' && shouldShowChangesButton()
+}
+
+async function openChangesScreen(bridge: EvenAppBridge, setStatus: SetStatus): Promise<void> {
+  const visibleFiles = getVisibleChangedFiles()
+  if (visibleFiles.length === 0) {
+    return
+  }
+
+  state.screen = 'changes'
+  state.changesSelectedIndex = clampIndex(state.changesSelectedIndex, visibleFiles.length)
+  await renderPage(bridge)
+  setStatus('G2 Claude: changed files. Tap file, double-tap back.')
+}
+
+async function openDiffScreen(
+  bridge: EvenAppBridge,
+  setStatus: SetStatus,
+  file: ChangedFile,
+): Promise<void> {
+  const diffText = await fetchFileDiffForCurrentDirectory(file.path)
+  state.diffFilePath = file.path
+  state.diffContent = diffText
+  state.diffScrollOffset = 0
+  state.screen = 'diff'
+  await renderPage(bridge)
+  setStatus(`G2 Claude: ${file.path} diff. Double-tap back.`)
+}
+
 function stopPolling(): void {
   if (state.pollIntervalId !== null) {
     window.clearInterval(state.pollIntervalId)
@@ -383,11 +566,53 @@ function appendConversationTurn(prompt: string, response: string): void {
 }
 
 function scrollToBottom(lines: string[]): void {
-  const maxOffset = Math.max(0, lines.length - DISPLAY_WINDOW_LINES)
+  const visibleRows = state.screen === 'root' && shouldShowChangesButton()
+    ? DISPLAY_WINDOW_LINES - 1
+    : DISPLAY_WINDOW_LINES
+  const maxOffset = Math.max(0, lines.length - visibleRows)
   state.scrollOffset = maxOffset
 }
 
+function clampIndex(index: number, length: number): number {
+  if (length <= 0) {
+    return 0
+  }
+  return Math.max(0, Math.min(length - 1, index))
+}
+
+function shouldShowChangesButton(): boolean {
+  if (state.changedFiles.length === 0) {
+    return false
+  }
+  return state.viewState === 'idle' || state.viewState === 'displaying'
+}
+
+function getCurrentTextScrollOffset(): number {
+  return state.screen === 'diff' ? state.diffScrollOffset : state.scrollOffset
+}
+
+function setCurrentTextScrollOffset(offset: number): void {
+  if (state.screen === 'diff') {
+    state.diffScrollOffset = offset
+    return
+  }
+  state.scrollOffset = offset
+}
+
 function stateToStatusLine(): string {
+  if (state.screen === 'changes') {
+    const count = state.changedFiles.length
+    return `Changed files (${count})`
+  }
+
+  if (state.screen === 'diff') {
+    const path = state.diffFilePath || 'File diff'
+    if (path.length <= 42) {
+      return path
+    }
+    return `...${path.slice(-39)}`
+  }
+
   switch (state.viewState) {
     case 'idle':
       return state.conversationHistory.length > 0 ? 'Double-tap for new prompt' : 'Double-tap to start'
@@ -539,9 +764,8 @@ function buildConversationLines(): string[] {
   return lines
 }
 
-function buildScrollbarLines(totalLines: number): string[] {
+function buildScrollbarLines(totalLines: number, scrollOffset: number, visible: number): string[] {
   const rows = Array.from({ length: DISPLAY_WINDOW_LINES }, () => SCROLL_TRACK_CHAR)
-  const visible = DISPLAY_WINDOW_LINES
   const total = Math.max(visible, totalLines)
   const maxOffset = Math.max(0, total - visible)
 
@@ -552,7 +776,7 @@ function buildScrollbarLines(totalLines: number): string[] {
   ))
   const maxThumbTop = Math.max(0, visible - thumbSize)
   const thumbTop = maxOffset > 0
-    ? Math.round((state.scrollOffset / maxOffset) * maxThumbTop)
+    ? Math.round((scrollOffset / maxOffset) * maxThumbTop)
     : 0
 
   for (let i = 0; i < thumbSize; i += 1) {
@@ -561,25 +785,37 @@ function buildScrollbarLines(totalLines: number): string[] {
   return rows
 }
 
-function buildRenderText(): { titleText: string, bodyText: string, scrollbarText: string } {
+function buildTextRenderForScreen(): { titleText: string, bodyText: string, scrollbarText: string } {
   state.statusLine = stateToStatusLine()
 
-  const all = buildConversationLines()
+  const all = state.screen === 'diff'
+    ? buildDiffLines()
+    : buildConversationLines()
   if (all.length === 0) {
     all.push('Ready')
   }
 
-  const maxOffset = Math.max(0, all.length - DISPLAY_WINDOW_LINES)
-  if (state.viewState === 'streaming') {
-    state.scrollOffset = maxOffset
+  const reserveBottomLine = state.screen === 'root' && shouldShowChangesButton()
+  const visibleContentRows = reserveBottomLine ? DISPLAY_WINDOW_LINES - 1 : DISPLAY_WINDOW_LINES
+  const maxOffset = Math.max(0, all.length - visibleContentRows)
+  let scrollOffset = getCurrentTextScrollOffset()
+  if (state.screen === 'root' && state.viewState === 'streaming') {
+    scrollOffset = maxOffset
   } else {
-    state.scrollOffset = Math.min(maxOffset, Math.max(0, state.scrollOffset))
+    scrollOffset = Math.min(maxOffset, Math.max(0, scrollOffset))
   }
+  setCurrentTextScrollOffset(scrollOffset)
 
   const page = all.slice(
-    state.scrollOffset,
-    state.scrollOffset + DISPLAY_WINDOW_LINES,
+    scrollOffset,
+    scrollOffset + visibleContentRows,
   )
+  while (page.length < visibleContentRows) {
+    page.push(' ')
+  }
+  if (reserveBottomLine) {
+    page.push(SHOW_CHANGES_LINE)
+  }
   while (page.length < DISPLAY_WINDOW_LINES) {
     page.push(' ')
   }
@@ -587,7 +823,7 @@ function buildRenderText(): { titleText: string, bodyText: string, scrollbarText
   return {
     titleText: state.statusLine,
     bodyText: page.join('\n'),
-    scrollbarText: buildScrollbarLines(all.length).join('\n'),
+    scrollbarText: buildScrollbarLines(all.length, scrollOffset, visibleContentRows).join('\n'),
   }
 }
 
@@ -658,6 +894,65 @@ function buildTextConfig(titleText: string, bodyText: string, scrollbarText: str
   }
 }
 
+function buildChangesListConfig(): {
+  containerTotalNum: number
+  textObject: TextContainerProperty[]
+  listObject: ListContainerProperty[]
+  currentSelectedItem: number
+} {
+  const visibleFiles = getVisibleChangedFiles()
+  const files = visibleFiles.length > 0
+    ? visibleFiles
+    : [{ path: 'No changed files', status: '' }]
+  const selectedIndex = clampIndex(state.changesSelectedIndex, files.length)
+  state.changesSelectedIndex = selectedIndex
+
+  const title = new TextContainerProperty({
+    containerID: TITLE_CONTAINER_ID,
+    containerName: TITLE_CONTAINER_NAME,
+    content: stateToStatusLine(),
+    xPosition: 8,
+    yPosition: 0,
+    width: 560,
+    height: 32,
+    isEventCapture: 0,
+  })
+
+  const status = new TextContainerProperty({
+    containerID: CHANGES_STATUS_CONTAINER_ID,
+    containerName: CHANGES_STATUS_CONTAINER_NAME,
+    content: 'Tap file to open diff · Double-tap back',
+    xPosition: 8,
+    yPosition: 34,
+    width: 560,
+    height: 60,
+    isEventCapture: 0,
+  })
+
+  const list = new ListContainerProperty({
+    containerID: CHANGES_LIST_CONTAINER_ID,
+    containerName: CHANGES_LIST_CONTAINER_NAME,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: files.length,
+      itemWidth: 566,
+      isItemSelectBorderEn: 1,
+      itemName: files.map((file) => toChangeListLabel(file)),
+    }),
+    isEventCapture: 1,
+    xPosition: 4,
+    yPosition: 98,
+    width: 572,
+    height: 190,
+  })
+
+  return {
+    containerTotalNum: 3,
+    textObject: [title, status],
+    listObject: [list],
+    currentSelectedItem: selectedIndex,
+  }
+}
+
 async function renderPage(bridge: EvenAppBridge): Promise<void> {
   state.renderPending = true
   if (state.renderInFlight) {
@@ -668,44 +963,68 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
   try {
     while (state.renderPending) {
       state.renderPending = false
-      const { titleText, bodyText, scrollbarText } = buildRenderText()
+      if (state.screen === 'changes') {
+        const config = buildChangesListConfig()
+
+        if (!state.startupRendered) {
+          await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
+          state.startupRendered = true
+        } else {
+          await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+        }
+
+        state.renderLayout = 'list'
+        state.renderedTitle = ''
+        state.renderedBody = ''
+        state.renderedScrollbar = ''
+        continue
+      }
+
+      const { titleText, bodyText, scrollbarText } = buildTextRenderForScreen()
       const config = buildTextConfig(titleText, bodyText, scrollbarText)
 
       if (!state.startupRendered) {
         await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
         state.startupRendered = true
+        state.renderLayout = 'text'
         state.renderedTitle = titleText
         state.renderedBody = bodyText
         state.renderedScrollbar = scrollbarText
         continue
       }
 
-      try {
-        await upgradeTextContainer(
-          bridge,
-          TITLE_CONTAINER_ID,
-          TITLE_CONTAINER_NAME,
-          state.renderedTitle,
-          titleText,
-        )
-        await upgradeTextContainer(
-          bridge,
-          BODY_CONTAINER_ID,
-          BODY_CONTAINER_NAME,
-          state.renderedBody,
-          bodyText,
-        )
-        await upgradeTextContainer(
-          bridge,
-          SCROLL_CONTAINER_ID,
-          SCROLL_CONTAINER_NAME,
-          state.renderedScrollbar,
-          scrollbarText,
-        )
-      } catch {
+      const mustRebuild = state.renderLayout !== 'text'
+      if (mustRebuild) {
         await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+      } else {
+        try {
+          await upgradeTextContainer(
+            bridge,
+            TITLE_CONTAINER_ID,
+            TITLE_CONTAINER_NAME,
+            state.renderedTitle,
+            titleText,
+          )
+          await upgradeTextContainer(
+            bridge,
+            BODY_CONTAINER_ID,
+            BODY_CONTAINER_NAME,
+            state.renderedBody,
+            bodyText,
+          )
+          await upgradeTextContainer(
+            bridge,
+            SCROLL_CONTAINER_ID,
+            SCROLL_CONTAINER_NAME,
+            state.renderedScrollbar,
+            scrollbarText,
+          )
+        } catch {
+          await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+        }
       }
 
+      state.renderLayout = 'text'
       state.renderedTitle = titleText
       state.renderedBody = bodyText
       state.renderedScrollbar = scrollbarText
@@ -789,6 +1108,7 @@ function startStreamingAnimation(
       void renderPage(bridge)
       setStatus('G2 Claude: response received')
       appendEventLog('G2 Claude: response received and rendered')
+      void refreshChangedFiles(bridge)
     }
   }, STREAM_INTERVAL_MS)
 }
@@ -835,6 +1155,13 @@ async function createSession(): Promise<void> {
 
   state.sessionId = sessionId
   state.sessionToken = sessionToken
+}
+
+async function ensureSessionReady(): Promise<void> {
+  if (state.sessionId && state.sessionToken) {
+    return
+  }
+  await createSession()
 }
 
 async function transcribeAudio(audioBlob: Blob): Promise<string> {
@@ -1097,6 +1424,7 @@ async function startRecording(bridge: EvenAppBridge, setStatus: SetStatus): Prom
 
   state.pcmAudioChunks = []
   state.pcmAudioBytes = 0
+  state.screen = 'root'
   state.currentPrompt = ''
   state.currentResponse = ''
   state.streamingText = ''
@@ -1149,6 +1477,7 @@ async function stopRecordingToBlob(bridge: EvenAppBridge): Promise<Blob> {
 
 async function stopRecordingAndSend(bridge: EvenAppBridge, setStatus: SetStatus): Promise<void> {
   const runVersion = state.runVersion
+  state.screen = 'root'
   setViewState('transcribing')
   await renderPage(bridge)
   setStatus('G2 Claude: transcribing audio...')
@@ -1166,7 +1495,7 @@ async function stopRecordingAndSend(bridge: EvenAppBridge, setStatus: SetStatus)
   await renderPage(bridge)
   ensureCurrentRun(runVersion)
   setStatus('G2 Claude: sending to Claude...')
-  await createSession()
+  await ensureSessionReady()
   ensureCurrentRun(runVersion)
   const requestId = createRequestId()
   state.activeRequestId = requestId
@@ -1204,11 +1533,15 @@ async function resetToIdle(
   if (options.clearHistory) {
     state.conversationHistory = []
   }
+  state.screen = 'root'
   state.currentPrompt = ''
   state.currentResponse = ''
   state.streamingText = ''
   state.streamCharsIndex = 0
   state.pendingPrompt = null
+  state.diffFilePath = ''
+  state.diffContent = ''
+  state.diffScrollOffset = 0
   setViewState('idle')
   scrollToBottom(buildConversationLines())
   await renderPage(bridge)
@@ -1216,17 +1549,22 @@ async function resetToIdle(
 }
 
 function moveScroll(bridge: EvenAppBridge, delta: number): void {
+  if (state.screen !== 'root') {
+    return
+  }
+
   const all = buildConversationLines()
   if (state.viewState === 'idle' && state.conversationHistory.length === 0) {
     return
   }
 
-  if (all.length <= DISPLAY_WINDOW_LINES) {
+  const visibleRows = shouldShowChangesButton() ? DISPLAY_WINDOW_LINES - 1 : DISPLAY_WINDOW_LINES
+  if (all.length <= visibleRows) {
     return
   }
 
   const step = delta < 0 ? -SCROLL_LINES_PER_EVENT : SCROLL_LINES_PER_EVENT
-  const maxOffset = Math.max(0, all.length - DISPLAY_WINDOW_LINES)
+  const maxOffset = Math.max(0, all.length - visibleRows)
   const next = Math.min(maxOffset, Math.max(0, state.scrollOffset + step))
   if (next === state.scrollOffset) {
     return
@@ -1236,13 +1574,72 @@ function moveScroll(bridge: EvenAppBridge, delta: number): void {
   void renderPage(bridge)
 }
 
+function moveDiffScroll(bridge: EvenAppBridge, delta: number): void {
+  if (state.screen !== 'diff') {
+    return
+  }
+
+  const all = buildDiffLines()
+  if (all.length <= DISPLAY_WINDOW_LINES) {
+    return
+  }
+
+  const step = delta < 0 ? -SCROLL_LINES_PER_EVENT : SCROLL_LINES_PER_EVENT
+  const maxOffset = Math.max(0, all.length - DISPLAY_WINDOW_LINES)
+  const next = Math.min(maxOffset, Math.max(0, state.diffScrollOffset + step))
+  if (next === state.diffScrollOffset) {
+    return
+  }
+
+  state.diffScrollOffset = next
+  void renderPage(bridge)
+}
+
+function getIncomingListIndex(event: EvenHubEvent, itemCount: number): number | null {
+  if (!event.listEvent || itemCount <= 0) {
+    return null
+  }
+
+  const raw = event.listEvent.currentSelectItemIndex
+  const parsed = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string'
+      ? Number.parseInt(raw, 10)
+      : Number.NaN
+
+  if (!Number.isNaN(parsed) && parsed >= 0 && parsed < itemCount) {
+    return parsed
+  }
+
+  return 0
+}
+
+function moveChangesSelection(bridge: EvenAppBridge, event: EvenHubEvent, delta: number): void {
+  const visibleFiles = getVisibleChangedFiles()
+  if (state.screen !== 'changes' || visibleFiles.length === 0) {
+    return
+  }
+
+  const incoming = getIncomingListIndex(event, visibleFiles.length)
+  const next = incoming !== null
+    ? clampIndex(incoming, visibleFiles.length)
+    : clampIndex(state.changesSelectedIndex + (delta < 0 ? -1 : 1), visibleFiles.length)
+
+  if (next === state.changesSelectedIndex) {
+    return
+  }
+
+  state.changesSelectedIndex = next
+  void renderPage(bridge)
+}
+
 function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
   if (state.eventLoopRegistered) {
     return
   }
 
   bridge.onEvenHubEvent(async (event) => {
-    if (event.audioEvent && state.viewState === 'recording') {
+    if (event.audioEvent && state.viewState === 'recording' && state.screen === 'root') {
       const rawPcm = event.audioEvent.audioPcm
       const pcm = rawPcm instanceof Uint8Array ? rawPcm : new Uint8Array(rawPcm)
       if (pcm.length > 0) {
@@ -1265,19 +1662,18 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
       return
     }
 
-    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT || eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
       if (!scrollThrottleOk()) {
         return
       }
-      moveScroll(bridge, -1)
-      return
-    }
-
-    if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-      if (!scrollThrottleOk()) {
-        return
+      const delta = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 1
+      if (state.screen === 'changes') {
+        moveChangesSelection(bridge, event, delta)
+      } else if (state.screen === 'diff') {
+        moveDiffScroll(bridge, delta)
+      } else {
+        moveScroll(bridge, delta)
       }
-      moveScroll(bridge, 1)
       return
     }
 
@@ -1296,6 +1692,22 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
 
     try {
       if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+        if (state.screen === 'diff') {
+          state.screen = 'changes'
+          await renderPage(bridge)
+          setStatus('G2 Claude: changed files. Tap file, double-tap back.')
+          appendEventLog('G2 Claude: back to changed files')
+          return
+        }
+
+        if (state.screen === 'changes') {
+          state.screen = 'root'
+          await renderPage(bridge)
+          setStatus('G2 Claude: back to conversation')
+          appendEventLog('G2 Claude: back to conversation')
+          return
+        }
+
         if (state.viewState === 'idle' || state.viewState === 'displaying') {
           appendEventLog('G2 Claude: double click start recording')
           await startRecording(bridge, setStatus)
@@ -1311,13 +1723,44 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
         return
       }
 
+      if (state.screen === 'changes') {
+        const visibleFiles = getVisibleChangedFiles()
+        if (visibleFiles.length === 0) {
+          state.screen = 'root'
+          await renderPage(bridge)
+          return
+        }
+
+        const incoming = getIncomingListIndex(event, visibleFiles.length)
+        if (incoming !== null) {
+          state.changesSelectedIndex = incoming
+        }
+        const file = visibleFiles[state.changesSelectedIndex]
+        if (!file) {
+          return
+        }
+        appendEventLog(`G2 Claude: opening diff for ${file.path}`)
+        await openDiffScreen(bridge, setStatus, file)
+        return
+      }
+
+      if (state.screen === 'diff') {
+        return
+      }
+
       if (state.viewState === 'error') {
         appendEventLog('G2 Claude: click retry from error')
         await resetToIdle(bridge, setStatus)
         return
       }
 
-      // Ignore single tap while idle/recording/transcribing/waiting/streaming/displaying.
+      if (canOpenChangesFromRoot()) {
+        appendEventLog('G2 Claude: opening changed files')
+        await openChangesScreen(bridge, setStatus)
+        return
+      }
+
+      // Ignore single tap while root screen is active with no actionable button.
     } catch (error) {
       if (error instanceof StaleOperationError) {
         return
@@ -1330,6 +1773,7 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
       await stopActiveMic(bridge)
       state.activeRequestId = null
       state.pendingPrompt = null
+      state.screen = 'root'
       state.currentPrompt = ''
       state.currentResponse = ''
       state.streamingText = ''
@@ -1367,14 +1811,17 @@ async function initClient(setStatus: SetStatus, timeoutMs = 6000): Promise<G2Cla
     registerEventLoop(state.bridge, setStatus)
     await createSession()
     await resetToIdle(state.bridge, setStatus, { clearHistory: true })
+    await refreshChangedFiles(state.bridge)
 
     return {
       mode: 'bridge',
       async start() {
         await resetToIdle(state.bridge!, setStatus, { clearHistory: true })
+        await refreshChangedFiles(state.bridge!)
       },
       async clear() {
         await resetToIdle(state.bridge!, setStatus, { clearHistory: true })
+        await refreshChangedFiles(state.bridge!)
       },
     }
   } catch {
