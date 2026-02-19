@@ -1611,7 +1611,7 @@ function getIncomingListIndex(event: EvenHubEvent, itemCount: number): number | 
     return parsed
   }
 
-  return 0
+  return null
 }
 
 function moveChangesSelection(bridge: EvenAppBridge, event: EvenHubEvent, delta: number): void {

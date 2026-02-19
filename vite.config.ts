@@ -487,6 +487,15 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
             sendText(res, 400, 'Requested file path is outside working directory')
             return
           }
+
+          if (isDirectory(resolvedPath)) {
+            sendJson(res, 200, {
+              path: requestedPath,
+              diff: '(Selected path is a directory. Choose a file to view diff.)',
+            })
+            return
+          }
+
           const gitPath = relative(workingDirectory, resolvedPath) || '.'
 
           const repoCheck = runGit(workingDirectory, ['rev-parse', '--is-inside-work-tree'])
