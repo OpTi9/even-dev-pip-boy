@@ -28,7 +28,7 @@ const MAX_WRAP_CHARS = 45
 // Epub app pattern: text containers are most reliable at ~9 visible lines.
 const DISPLAY_WINDOW_LINES = 9
 const SCROLL_COOLDOWN_MS = 80
-const SCROLL_LINES_PER_EVENT = 2
+const SCROLL_LINES_PER_EVENT = 4
 const POLL_INTERVAL_MS = 2000
 const WAIT_TIMEOUT_MS = 45_000
 const PCM_SAMPLE_RATE = 16_000
@@ -51,7 +51,8 @@ const STREAM_INTERVAL_MS = 120
 const STREAM_CHARS_PER_TICK = 8
 const SECTION_YOU = '── You ──'
 const SECTION_CLAUDE = '── Claude ──'
-const SCROLL_THUMB_CHAR = '▪'
+const SCROLL_TRACK_CHAR = '·'
+const SCROLL_THUMB_CHAR = '•'
 const TITLE_CONTAINER_ID = 1
 const BODY_CONTAINER_ID = 2
 const SCROLL_CONTAINER_ID = 3
@@ -459,18 +460,24 @@ function buildConversationLines(): string[] {
 }
 
 function buildScrollbarLines(totalLines: number): string[] {
-  const rows = Array.from({ length: DISPLAY_WINDOW_LINES }, () => ' ')
-  if (totalLines <= DISPLAY_WINDOW_LINES) {
-    return rows
-  }
+  const rows = Array.from({ length: DISPLAY_WINDOW_LINES }, () => SCROLL_TRACK_CHAR)
+  const visible = DISPLAY_WINDOW_LINES
+  const total = Math.max(visible, totalLines)
+  const maxOffset = Math.max(0, total - visible)
 
-  const maxOffset = Math.max(0, totalLines - DISPLAY_WINDOW_LINES)
-  const maxThumbTop = Math.max(0, DISPLAY_WINDOW_LINES - 1)
+  // Scale thumb size by viewport ratio so position feels meaningful.
+  const thumbSize = Math.max(1, Math.min(
+    visible,
+    Math.round((visible * visible) / total),
+  ))
+  const maxThumbTop = Math.max(0, visible - thumbSize)
   const thumbTop = maxOffset > 0
     ? Math.round((state.scrollOffset / maxOffset) * maxThumbTop)
     : 0
 
-  rows[thumbTop] = SCROLL_THUMB_CHAR
+  for (let i = 0; i < thumbSize; i += 1) {
+    rows[thumbTop + i] = SCROLL_THUMB_CHAR
+  }
   return rows
 }
 
