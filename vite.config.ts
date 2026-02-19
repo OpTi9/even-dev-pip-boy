@@ -92,6 +92,35 @@ function runGit(cwd: string, args: string[]): GitRunResult {
   }
 }
 
+function normalizeGitStatusForDisplay(rawStatusToken: string): string {
+  if (rawStatusToken === '??') {
+    return 'A'
+  }
+  if (rawStatusToken === '!!') {
+    return 'I'
+  }
+
+  const status = rawStatusToken.trim() || rawStatusToken
+  return status
+}
+
+function isDirectoryGitPath(workingDirectory: string, gitPath: string): boolean {
+  if (gitPath.endsWith('/')) {
+    return true
+  }
+
+  const absolutePath = resolve(workingDirectory, gitPath)
+  if (!existsSync(absolutePath)) {
+    return false
+  }
+
+  try {
+    return statSync(absolutePath).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function resolveWorkingDirectory(raw: unknown, fallback: string): string {
   if (typeof raw !== 'string' || !raw.trim()) {
     return resolve(fallback)
@@ -110,7 +139,7 @@ function isDirectory(pathValue: string): boolean {
   }
 }
 
-function parseGitChangedFiles(stdout: string): GitChangedFile[] {
+function parseGitChangedFiles(stdout: string, workingDirectory: string): GitChangedFile[] {
   const lines = stdout.split('\n')
   const files: GitChangedFile[] = []
 
@@ -121,7 +150,7 @@ function parseGitChangedFiles(stdout: string): GitChangedFile[] {
     }
 
     const statusToken = line.slice(0, 2)
-    const status = statusToken.trim() || statusToken
+    const status = normalizeGitStatusForDisplay(statusToken)
     let filePath = line.slice(3).trim()
     if (!filePath) {
       continue
@@ -135,6 +164,10 @@ function parseGitChangedFiles(stdout: string): GitChangedFile[] {
 
     if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length >= 2) {
       filePath = filePath.slice(1, -1)
+    }
+
+    if (isDirectoryGitPath(workingDirectory, filePath)) {
+      continue
     }
 
     files.push({
@@ -446,7 +479,7 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
             return
           }
 
-          const files = parseGitChangedFiles(statusResult.stdout)
+          const files = parseGitChangedFiles(statusResult.stdout, workingDirectory)
           sendJson(res, 200, { files })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)

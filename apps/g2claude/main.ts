@@ -1,7 +1,5 @@
 import {
   CreateStartUpPageContainer,
-  ListContainerProperty,
-  ListItemContainerProperty,
   OsEventTypeList,
   RebuildPageContainer,
   TextContainerUpgrade,
@@ -38,6 +36,7 @@ const MAX_WRAP_CHARS = 45
 const DISPLAY_WINDOW_LINES = 9
 const SCROLL_COOLDOWN_MS = 80
 const SCROLL_LINES_PER_EVENT = 4
+const CHANGES_TAP_GUARD_MS = 300
 const POLL_INTERVAL_MS = 2000
 const WAIT_TIMEOUT_MS = 45_000
 const PCM_SAMPLE_RATE = 16_000
@@ -72,10 +71,6 @@ const SCROLL_CONTAINER_ID = 3
 const TITLE_CONTAINER_NAME = 'g2-title'
 const BODY_CONTAINER_NAME = 'g2-body'
 const SCROLL_CONTAINER_NAME = 'g2-scroll'
-const CHANGES_STATUS_CONTAINER_ID = 2
-const CHANGES_LIST_CONTAINER_ID = 3
-const CHANGES_STATUS_CONTAINER_NAME = 'g2-chg-st'
-const CHANGES_LIST_CONTAINER_NAME = 'g2-chg-list'
 
 class HttpStatusError extends Error {
   status: number
@@ -120,6 +115,7 @@ const state: {
   conversationHistory: ConversationTurn[]
   changedFiles: ChangedFile[]
   changesSelectedIndex: number
+  changesTapGuardUntil: number
   diffFilePath: string
   diffContent: string
   currentPrompt: string
@@ -165,6 +161,7 @@ const state: {
   conversationHistory: [],
   changedFiles: [],
   changesSelectedIndex: 0,
+  changesTapGuardUntil: 0,
   diffFilePath: '',
   diffContent: '',
   currentPrompt: '',
@@ -444,6 +441,17 @@ function buildDiffLines(): string[] {
   return wrapText(state.diffContent || '(No textual diff available)')
 }
 
+function buildChangesLines(): string[] {
+  const visibleFiles = getVisibleChangedFiles()
+  if (visibleFiles.length === 0) {
+    state.changesSelectedIndex = 0
+    return ['(No changed files)']
+  }
+
+  state.changesSelectedIndex = clampIndex(state.changesSelectedIndex, visibleFiles.length)
+  return visibleFiles.map((file, index) => `${index === state.changesSelectedIndex ? '▶' : ' '} ${toChangeListLabel(file)}`)
+}
+
 function canOpenChangesFromRoot(): boolean {
   return state.screen === 'root' && shouldShowChangesButton()
 }
@@ -455,6 +463,8 @@ async function openChangesScreen(bridge: EvenAppBridge, setStatus: SetStatus): P
   }
 
   state.screen = 'changes'
+  // Ignore stale tap replay right after switching layouts.
+  state.changesTapGuardUntil = Date.now() + CHANGES_TAP_GUARD_MS
   state.changesSelectedIndex = clampIndex(state.changesSelectedIndex, visibleFiles.length)
   await renderPage(bridge)
   setStatus('G2 Claude: changed files. Tap file, double-tap back.')
@@ -578,6 +588,21 @@ function clampIndex(index: number, length: number): number {
     return 0
   }
   return Math.max(0, Math.min(length - 1, index))
+}
+
+function isRebuildSuccess(result: unknown): boolean {
+  if (result === true || result === 0 || result === '0') {
+    return true
+  }
+
+  if (typeof result === 'string') {
+    const normalized = result.trim().toUpperCase()
+    if (normalized.includes('SUCCESS')) {
+      return true
+    }
+  }
+
+  return false
 }
 
 function shouldShowChangesButton(): boolean {
@@ -788,7 +813,9 @@ function buildScrollbarLines(totalLines: number, scrollOffset: number, visible: 
 function buildTextRenderForScreen(): { titleText: string, bodyText: string, scrollbarText: string } {
   state.statusLine = stateToStatusLine()
 
-  const all = state.screen === 'diff'
+  const all = state.screen === 'changes'
+    ? buildChangesLines()
+    : state.screen === 'diff'
     ? buildDiffLines()
     : buildConversationLines()
   if (all.length === 0) {
@@ -798,13 +825,19 @@ function buildTextRenderForScreen(): { titleText: string, bodyText: string, scro
   const reserveBottomLine = state.screen === 'root' && shouldShowChangesButton()
   const visibleContentRows = reserveBottomLine ? DISPLAY_WINDOW_LINES - 1 : DISPLAY_WINDOW_LINES
   const maxOffset = Math.max(0, all.length - visibleContentRows)
-  let scrollOffset = getCurrentTextScrollOffset()
-  if (state.screen === 'root' && state.viewState === 'streaming') {
-    scrollOffset = maxOffset
+  let scrollOffset = 0
+  if (state.screen === 'changes') {
+    const preferredOffset = Math.max(0, state.changesSelectedIndex - Math.floor(visibleContentRows / 2))
+    scrollOffset = Math.min(maxOffset, preferredOffset)
   } else {
-    scrollOffset = Math.min(maxOffset, Math.max(0, scrollOffset))
+    scrollOffset = getCurrentTextScrollOffset()
+    if (state.screen === 'root' && state.viewState === 'streaming') {
+      scrollOffset = maxOffset
+    } else {
+      scrollOffset = Math.min(maxOffset, Math.max(0, scrollOffset))
+    }
+    setCurrentTextScrollOffset(scrollOffset)
   }
-  setCurrentTextScrollOffset(scrollOffset)
 
   const page = all.slice(
     scrollOffset,
@@ -894,65 +927,6 @@ function buildTextConfig(titleText: string, bodyText: string, scrollbarText: str
   }
 }
 
-function buildChangesListConfig(): {
-  containerTotalNum: number
-  textObject: TextContainerProperty[]
-  listObject: ListContainerProperty[]
-  currentSelectedItem: number
-} {
-  const visibleFiles = getVisibleChangedFiles()
-  const files = visibleFiles.length > 0
-    ? visibleFiles
-    : [{ path: 'No changed files', status: '' }]
-  const selectedIndex = clampIndex(state.changesSelectedIndex, files.length)
-  state.changesSelectedIndex = selectedIndex
-
-  const title = new TextContainerProperty({
-    containerID: TITLE_CONTAINER_ID,
-    containerName: TITLE_CONTAINER_NAME,
-    content: stateToStatusLine(),
-    xPosition: 8,
-    yPosition: 0,
-    width: 560,
-    height: 32,
-    isEventCapture: 0,
-  })
-
-  const status = new TextContainerProperty({
-    containerID: CHANGES_STATUS_CONTAINER_ID,
-    containerName: CHANGES_STATUS_CONTAINER_NAME,
-    content: 'Tap file to open diff · Double-tap back',
-    xPosition: 8,
-    yPosition: 34,
-    width: 560,
-    height: 60,
-    isEventCapture: 0,
-  })
-
-  const list = new ListContainerProperty({
-    containerID: CHANGES_LIST_CONTAINER_ID,
-    containerName: CHANGES_LIST_CONTAINER_NAME,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: files.length,
-      itemWidth: 566,
-      isItemSelectBorderEn: 1,
-      itemName: files.map((file) => toChangeListLabel(file)),
-    }),
-    isEventCapture: 1,
-    xPosition: 4,
-    yPosition: 98,
-    width: 572,
-    height: 190,
-  })
-
-  return {
-    containerTotalNum: 3,
-    textObject: [title, status],
-    listObject: [list],
-    currentSelectedItem: selectedIndex,
-  }
-}
-
 async function renderPage(bridge: EvenAppBridge): Promise<void> {
   state.renderPending = true
   if (state.renderInFlight) {
@@ -963,28 +937,14 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
   try {
     while (state.renderPending) {
       state.renderPending = false
-      if (state.screen === 'changes') {
-        const config = buildChangesListConfig()
-
-        if (!state.startupRendered) {
-          await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
-          state.startupRendered = true
-        } else {
-          await bridge.rebuildPageContainer(new RebuildPageContainer(config))
-        }
-
-        state.renderLayout = 'list'
-        state.renderedTitle = ''
-        state.renderedBody = ''
-        state.renderedScrollbar = ''
-        continue
-      }
-
       const { titleText, bodyText, scrollbarText } = buildTextRenderForScreen()
       const config = buildTextConfig(titleText, bodyText, scrollbarText)
 
       if (!state.startupRendered) {
-        await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
+        const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
+        if (result !== 0) {
+          throw new Error(`createStartUpPageContainer failed (${String(result)})`)
+        }
         state.startupRendered = true
         state.renderLayout = 'text'
         state.renderedTitle = titleText
@@ -995,7 +955,10 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
 
       const mustRebuild = state.renderLayout !== 'text'
       if (mustRebuild) {
-        await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+        const result = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+        if (!isRebuildSuccess(result)) {
+          throw new Error(`rebuildPageContainer failed for text screen (${String(result)})`)
+        }
       } else {
         try {
           await upgradeTextContainer(
@@ -1020,7 +983,10 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
             scrollbarText,
           )
         } catch {
-          await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+          const result = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+          if (!isRebuildSuccess(result)) {
+            throw new Error(`rebuildPageContainer failed after text upgrade fallback (${String(result)})`)
+          }
         }
       }
 
@@ -1542,6 +1508,7 @@ async function resetToIdle(
   state.diffFilePath = ''
   state.diffContent = ''
   state.diffScrollOffset = 0
+  state.changesTapGuardUntil = 0
   setViewState('idle')
   scrollToBottom(buildConversationLines())
   await renderPage(bridge)
@@ -1595,35 +1562,13 @@ function moveDiffScroll(bridge: EvenAppBridge, delta: number): void {
   void renderPage(bridge)
 }
 
-function getIncomingListIndex(event: EvenHubEvent, itemCount: number): number | null {
-  if (!event.listEvent || itemCount <= 0) {
-    return null
-  }
-
-  const raw = event.listEvent.currentSelectItemIndex
-  const parsed = typeof raw === 'number'
-    ? raw
-    : typeof raw === 'string'
-      ? Number.parseInt(raw, 10)
-      : Number.NaN
-
-  if (!Number.isNaN(parsed) && parsed >= 0 && parsed < itemCount) {
-    return parsed
-  }
-
-  return null
-}
-
-function moveChangesSelection(bridge: EvenAppBridge, event: EvenHubEvent, delta: number): void {
+function moveChangesSelection(bridge: EvenAppBridge, delta: number): void {
   const visibleFiles = getVisibleChangedFiles()
   if (state.screen !== 'changes' || visibleFiles.length === 0) {
     return
   }
 
-  const incoming = getIncomingListIndex(event, visibleFiles.length)
-  const next = incoming !== null
-    ? clampIndex(incoming, visibleFiles.length)
-    : clampIndex(state.changesSelectedIndex + (delta < 0 ? -1 : 1), visibleFiles.length)
+  const next = clampIndex(state.changesSelectedIndex + (delta < 0 ? -1 : 1), visibleFiles.length)
 
   if (next === state.changesSelectedIndex) {
     return
@@ -1668,7 +1613,7 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
       }
       const delta = eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 1
       if (state.screen === 'changes') {
-        moveChangesSelection(bridge, event, delta)
+        moveChangesSelection(bridge, delta)
       } else if (state.screen === 'diff') {
         moveDiffScroll(bridge, delta)
       } else {
@@ -1694,6 +1639,7 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
       if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
         if (state.screen === 'diff') {
           state.screen = 'changes'
+          state.changesTapGuardUntil = Date.now() + CHANGES_TAP_GUARD_MS
           await renderPage(bridge)
           setStatus('G2 Claude: changed files. Tap file, double-tap back.')
           appendEventLog('G2 Claude: back to changed files')
@@ -1724,6 +1670,10 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
       }
 
       if (state.screen === 'changes') {
+        if (Date.now() < state.changesTapGuardUntil) {
+          return
+        }
+
         const visibleFiles = getVisibleChangedFiles()
         if (visibleFiles.length === 0) {
           state.screen = 'root'
@@ -1731,10 +1681,7 @@ function registerEventLoop(bridge: EvenAppBridge, setStatus: SetStatus): void {
           return
         }
 
-        const incoming = getIncomingListIndex(event, visibleFiles.length)
-        if (incoming !== null) {
-          state.changesSelectedIndex = incoming
-        }
+        state.changesSelectedIndex = clampIndex(state.changesSelectedIndex, visibleFiles.length)
         const file = visibleFiles[state.changesSelectedIndex]
         if (!file) {
           return
