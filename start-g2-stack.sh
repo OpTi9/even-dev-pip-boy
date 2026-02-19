@@ -14,6 +14,7 @@ G2_CALLBACK_HOST="${G2_CALLBACK_HOST:-127.0.0.1}"
 G2_PORT="${G2_PORT:-5174}"
 G2_BOT_PORT="${G2_BOT_PORT:-8080}"
 G2_KEEP_EXISTING="${G2_KEEP_EXISTING:-0}"
+G2_DEFAULT_WORKING_DIRECTORY=""
 
 BOT_PID_FILE="$STATE_DIR/bot.pid"
 VITE_PID_FILE="$STATE_DIR/vite.pid"
@@ -78,6 +79,52 @@ upsert_env_line() {
   else
     printf '\n%s=%s\n' "$key" "$value" >> "$file"
   fi
+}
+
+read_env_value() {
+  local key="$1"
+  local file="$2"
+  local line value first last
+
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n 1 || true)"
+  if [ -z "${line:-}" ]; then
+    return 0
+  fi
+
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+
+  if [ "${#value}" -ge 2 ]; then
+    first="${value:0:1}"
+    last="${value: -1}"
+    if [ "$first" = '"' ] && [ "$last" = '"' ]; then
+      value="${value:1:${#value}-2}"
+    elif [ "$first" = "'" ] && [ "$last" = "'" ]; then
+      value="${value:1:${#value}-2}"
+    fi
+  fi
+
+  printf '%s' "$value"
+}
+
+resolve_g2_default_working_directory() {
+  local value=""
+
+  value="$(read_env_value "APPROVED_DIRECTORY" "$BOT_ENV_FILE")"
+  if [ -z "${value:-}" ] && [ -f "$LEGACY_BOT_ENV_FILE" ]; then
+    value="$(read_env_value "APPROVED_DIRECTORY" "$LEGACY_BOT_ENV_FILE")"
+  fi
+  if [ -z "${value:-}" ]; then
+    value="$HOME/Desktop"
+  fi
+
+  G2_DEFAULT_WORKING_DIRECTORY="$value"
 }
 
 configure_bot_env() {
@@ -294,6 +341,7 @@ start_vite() {
     VITE_HOST=0.0.0.0 \
     VITE_ALLOWED_HOSTS="$G2_TS_HOST" \
     G2_BOT_PORT="$G2_BOT_PORT" \
+    G2_DEFAULT_WORKING_DIRECTORY="$G2_DEFAULT_WORKING_DIRECTORY" \
     "$VITE_BIN" --host 0.0.0.0 --strictPort --port "$G2_PORT" >> "$LOG_DIR/vite.log" 2>&1
   ) &
 
@@ -397,6 +445,7 @@ up_stack() {
   ensure_bot_env
   ensure_bot_deps
   configure_bot_env
+  resolve_g2_default_working_directory
   if ! start_bot; then
     return 1
   fi

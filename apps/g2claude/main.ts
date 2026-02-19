@@ -53,6 +53,9 @@ const SECTION_YOU = '── You ──'
 const SECTION_CLAUDE = '── Claude ──'
 const SCROLL_TRACK_CHAR = '·'
 const SCROLL_THUMB_CHAR = '•'
+const WORKDIR_INPUT_ID = 'g2-workdir-input'
+const WORKDIR_CONTAINER_ID = 'g2-workdir-controls'
+const FALLBACK_WORKING_DIRECTORY = '/home/aza/Desktop'
 const TITLE_CONTAINER_ID = 1
 const BODY_CONTAINER_ID = 2
 const SCROLL_CONTAINER_ID = 3
@@ -86,6 +89,8 @@ const state: {
   errorDetail: string
   sessionId: string | null
   sessionToken: string | null
+  defaultWorkingDirectory: string
+  workingDirectory: string
   scrollOffset: number
   micOpen: boolean
   pcmAudioChunks: Uint8Array[]
@@ -122,6 +127,8 @@ const state: {
   errorDetail: '',
   sessionId: null,
   sessionToken: null,
+  defaultWorkingDirectory: FALLBACK_WORKING_DIRECTORY,
+  workingDirectory: FALLBACK_WORKING_DIRECTORY,
   scrollOffset: 0,
   micOpen: false,
   pcmAudioChunks: [],
@@ -209,6 +216,79 @@ function scrollThrottleOk(): boolean {
   }
   state.lastScrollTime = now
   return true
+}
+
+function normalizeWorkingDirectoryWithFallback(raw: string, fallback: string): string {
+  const value = raw.trim()
+  return value || fallback || FALLBACK_WORKING_DIRECTORY
+}
+
+function normalizeWorkingDirectory(raw: string): string {
+  return normalizeWorkingDirectoryWithFallback(raw, state.defaultWorkingDirectory)
+}
+
+function getWorkingDirectoryInput(): HTMLInputElement | null {
+  return document.getElementById(WORKDIR_INPUT_ID) as HTMLInputElement | null
+}
+
+function syncWorkingDirectoryInput(): void {
+  const input = getWorkingDirectoryInput()
+  if (!input) {
+    return
+  }
+
+  if (input.value !== state.workingDirectory) {
+    input.value = state.workingDirectory
+  }
+}
+
+function updateWorkingDirectoryFromInput(): void {
+  const input = getWorkingDirectoryInput()
+  if (!input) {
+    return
+  }
+
+  state.workingDirectory = normalizeWorkingDirectory(input.value)
+  input.value = state.workingDirectory
+}
+
+function ensureWorkingDirectoryControls(): void {
+  const app = document.getElementById('app')
+  if (!app) {
+    return
+  }
+
+  const existing = document.getElementById(WORKDIR_CONTAINER_ID)
+  if (existing) {
+    syncWorkingDirectoryInput()
+    return
+  }
+
+  const wrapper = document.createElement('div')
+  wrapper.id = WORKDIR_CONTAINER_ID
+
+  const label = document.createElement('label')
+  label.htmlFor = WORKDIR_INPUT_ID
+  label.textContent = 'Claude working directory'
+
+  const input = document.createElement('input')
+  input.id = WORKDIR_INPUT_ID
+  input.type = 'text'
+  input.placeholder = FALLBACK_WORKING_DIRECTORY
+  input.value = state.workingDirectory
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.addEventListener('change', updateWorkingDirectoryFromInput)
+  input.addEventListener('blur', updateWorkingDirectoryFromInput)
+
+  wrapper.append(label, input)
+
+  const status = document.getElementById('status')
+  if (status?.parentElement === app) {
+    app.insertBefore(wrapper, status)
+  } else {
+    app.appendChild(wrapper)
+  }
 }
 
 function stopPolling(): void {
@@ -727,13 +807,31 @@ async function createSession(): Promise<void> {
     throw new HttpStatusError(message || `Session init failed (${response.status})`, response.status)
   }
 
-  const data = (await response.json()) as { sessionId?: unknown, sessionToken?: unknown }
+  const data = (await response.json()) as {
+    sessionId?: unknown
+    sessionToken?: unknown
+    defaultWorkingDirectory?: unknown
+  }
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId : ''
   const sessionToken = typeof data.sessionToken === 'string' ? data.sessionToken : ''
 
   if (!sessionId || !sessionToken) {
     throw new Error('Session init returned invalid credentials')
   }
+
+  const previousDefault = state.defaultWorkingDirectory
+  const configuredDefault = typeof data.defaultWorkingDirectory === 'string'
+    ? normalizeWorkingDirectoryWithFallback(data.defaultWorkingDirectory, previousDefault)
+    : previousDefault
+  const isUsingPreviousDefault = !state.workingDirectory || state.workingDirectory === previousDefault
+
+  state.defaultWorkingDirectory = configuredDefault
+  if (isUsingPreviousDefault) {
+    state.workingDirectory = configuredDefault
+  } else {
+    state.workingDirectory = normalizeWorkingDirectory(state.workingDirectory)
+  }
+  syncWorkingDirectoryInput()
 
   state.sessionId = sessionId
   state.sessionToken = sessionToken
@@ -810,6 +908,8 @@ async function sendPrompt(text: string): Promise<void> {
     throw new Error('No active G2 session')
   }
 
+  updateWorkingDirectoryFromInput()
+
   const response = await fetch('/__g2_send', {
     method: 'POST',
     headers: {
@@ -819,6 +919,7 @@ async function sendPrompt(text: string): Promise<void> {
       text,
       sessionId: state.sessionId,
       sessionToken: state.sessionToken,
+      workingDirectory: state.workingDirectory,
     }),
   })
 
@@ -1284,10 +1385,14 @@ async function initClient(setStatus: SetStatus, timeoutMs = 6000): Promise<G2Cla
 let g2Client: G2ClaudeClient | null = null
 
 export function createG2ClaudeActions(setStatus: SetStatus): AppActions {
+  ensureWorkingDirectoryControls()
+
   return {
     async connect() {
       setStatus('G2 Claude: connecting to Even bridge...')
       appendEventLog('G2 Claude: connect requested')
+      ensureWorkingDirectoryControls()
+      updateWorkingDirectoryFromInput()
 
       try {
         g2Client = await initClient(setStatus)

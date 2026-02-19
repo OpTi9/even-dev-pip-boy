@@ -90,6 +90,11 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
           return
         }
 
+        const defaultWorkingDirectory = (
+          env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
+          process.env.G2_DEFAULT_WORKING_DIRECTORY?.trim() ||
+          '/home/aza/Desktop'
+        )
         const sessionId = randomUUID()
         const sessionToken = randomBytes(24).toString('hex')
         g2Sessions.set(sessionId, {
@@ -101,6 +106,7 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
         sendJson(res, 200, {
           sessionId,
           sessionToken,
+          defaultWorkingDirectory,
         })
       })
 
@@ -167,12 +173,16 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
             text?: unknown
             sessionId?: unknown
             sessionToken?: unknown
+            workingDirectory?: unknown
           }
 
           const text = typeof payload.text === 'string' ? payload.text.trim() : ''
           const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : ''
           const sessionToken = typeof payload.sessionToken === 'string'
             ? payload.sessionToken.trim()
+            : ''
+          const workingDirectory = typeof payload.workingDirectory === 'string'
+            ? payload.workingDirectory.trim()
             : ''
 
           if (!text || !sessionId || !sessionToken) {
@@ -199,6 +209,7 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
               text,
               session_id: sessionId,
               source: 'even-g2',
+              ...(workingDirectory ? { working_directory: workingDirectory } : {}),
             }),
           })
 

@@ -19,6 +19,27 @@ button {
   margin-top: 10px;
 }
 
+#g2-workdir-controls {
+  margin: 10px 0;
+}
+
+#g2-workdir-controls label {
+  display: block;
+  margin-bottom: 6px;
+  color: #d8d8d8;
+  font-size: 12px;
+}
+
+#g2-workdir-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #2f2f2f;
+  background: #101010;
+  color: #f1f1f1;
+}
+
 #event-log {
   margin-top: 12px;
   padding: 10px;
