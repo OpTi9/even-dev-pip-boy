@@ -13,6 +13,19 @@ import {
 import type { AppActions, SetStatus } from '../_shared/app-types'
 import { appendEventLog } from '../_shared/log'
 
+declare global {
+  interface ImportMetaEnv {
+    readonly VITE_CODEX_WS_URL?: string
+    readonly VITE_CODEX_WS_PORT?: string
+    readonly VITE_CODEX_APPROVAL_POLICY?: string
+    readonly VITE_CODEX_SANDBOX_MODE?: string
+  }
+
+  interface ImportMeta {
+    readonly env: ImportMetaEnv
+  }
+}
+
 type ViewState =
   | 'connecting'
   | 'list'
@@ -1056,7 +1069,7 @@ function buildListLines(): string[] {
 
   return entries.map((entry, index) => {
     const marker = index === state.listSelectedIndex ? '> ' : '  '
-    return `${marker}${entry.label}`
+    return `${marker}* ${entry.label}`
   })
 }
 
@@ -1125,7 +1138,7 @@ function buildTextConfig(titleText: string, bodyText: string): {
 }
 
 function buildListEntries(): Array<{ type: 'thread' | 'new', thread?: ThreadSummary, label: string }> {
-  const entries = state.threadList.map((thread) => ({
+  const entries: Array<{ type: 'thread' | 'new', thread?: ThreadSummary, label: string }> = state.threadList.map((thread) => ({
     type: 'thread' as const,
     thread,
     label: toThreadLabel(thread),
