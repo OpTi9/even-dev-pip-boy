@@ -780,6 +780,9 @@ export default defineConfig(({ mode }) => {
     .split(',')
     .map((host) => host.trim())
     .filter(Boolean)
+  const codexAppServerUrl = env.CODEX_APP_SERVER_URL
+    || process.env.CODEX_APP_SERVER_URL
+    || 'ws://127.0.0.1:9999'
 
   return {
     plugins: [
@@ -796,6 +799,23 @@ export default defineConfig(({ mode }) => {
       allowedHosts: allowedHosts.length > 0 ? allowedHosts : undefined,
       fs: {
         allow: ['.', ...buildFsAllow()],
+      },
+      proxy: {
+        '/codex-ws': {
+          target: codexAppServerUrl,
+          ws: true,
+          changeOrigin: true,
+          rewriteWsOrigin: true,
+          // Codex app-server expects websocket upgrades on root (`/`).
+          rewrite: (path) => path.replace(/^\/codex-ws/, '') || '/',
+          configure: (proxy) => {
+            // Some embedded browsers send malformed extension offers that
+            // tokio-tungstenite rejects during handshake.
+            proxy.on('proxyReqWs', (proxyReq) => {
+              proxyReq.removeHeader('sec-websocket-extensions')
+            })
+          },
+        },
       },
     },
   }
