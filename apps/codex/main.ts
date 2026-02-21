@@ -307,6 +307,7 @@ const OVERLOADED_ERROR_CODE = -32001
 const REQUEST_TIMEOUT_MS = 45_000
 const BASE_BACKOFF_MS = 1_000
 const STREAM_STALL_TIMEOUT_MS = 20_000
+const STREAM_IDLE_TO_WAITING_MS = 1_500
 const DEFAULT_CODEX_APPROVAL_POLICY = 'never'
 const DEFAULT_CODEX_SANDBOX_MODE = 'danger-full-access'
 
@@ -381,6 +382,7 @@ const state: {
   renderedAux: string
   busy: boolean
   lastStreamEventAt: number
+  stallRecoveryInFlight: boolean
 } = {
   bridge: null,
   startupRendered: false,
@@ -421,6 +423,7 @@ const state: {
   renderedAux: '',
   busy: false,
   lastStreamEventAt: 0,
+  stallRecoveryInFlight: false,
 }
 
 function sleep(ms: number): Promise<void> {
@@ -885,6 +888,67 @@ function extractConversationHistoryFromThread(threadRaw: unknown): ConversationT
   return history
 }
 
+function extractAgentTextFromTurn(turnRaw: unknown): string {
+  if (!turnRaw || typeof turnRaw !== 'object') {
+    return ''
+  }
+
+  const turn = turnRaw as Record<string, unknown>
+  if (!Array.isArray(turn.items)) {
+    return ''
+  }
+
+  const parts: string[] = []
+  for (const itemRaw of turn.items) {
+    if (!itemRaw || typeof itemRaw !== 'object') {
+      continue
+    }
+    const item = itemRaw as Record<string, unknown>
+    if (item.type !== 'agentMessage' || typeof item.text !== 'string') {
+      continue
+    }
+    const text = sanitizeDisplayText(item.text)
+    if (text) {
+      parts.push(text)
+    }
+  }
+
+  return sanitizeDisplayText(parts.join('\n'))
+}
+
+function findActiveTurnInThread(threadRaw: unknown): Record<string, unknown> | null {
+  if (!threadRaw || typeof threadRaw !== 'object') {
+    return null
+  }
+
+  const thread = threadRaw as Record<string, unknown>
+  if (!Array.isArray(thread.turns) || thread.turns.length === 0) {
+    return null
+  }
+
+  if (state.activeTurnId) {
+    for (let i = thread.turns.length - 1; i >= 0; i -= 1) {
+      const candidateRaw = thread.turns[i]
+      if (!candidateRaw || typeof candidateRaw !== 'object') {
+        continue
+      }
+      const candidate = candidateRaw as Record<string, unknown>
+      if (typeof candidate.id === 'string' && candidate.id === state.activeTurnId) {
+        return candidate
+      }
+    }
+  }
+
+  for (let i = thread.turns.length - 1; i >= 0; i -= 1) {
+    const candidateRaw = thread.turns[i]
+    if (candidateRaw && typeof candidateRaw === 'object') {
+      return candidateRaw as Record<string, unknown>
+    }
+  }
+
+  return null
+}
+
 function stateToStatusLine(): string {
   if (state.screen === 'list') {
     return state.threadList.length > 0
@@ -1308,36 +1372,37 @@ function ensureStreamingDrainLoop(bridge: EvenAppBridge, setStatus: SetStatus): 
   }
 
   state.streamIntervalId = window.setInterval(() => {
+    const now = Date.now()
+
+    if (
+      state.viewState === 'streaming' &&
+      state.pendingDelta.length === 0 &&
+      !state.turnCompletedPending &&
+      state.lastStreamEventAt > 0 &&
+      (now - state.lastStreamEventAt) > STREAM_IDLE_TO_WAITING_MS
+    ) {
+      setViewState('waiting')
+      startThinkingAnimation(bridge)
+      void renderPage(bridge)
+    }
+
     if (state.viewState === 'waiting' || state.viewState === 'streaming') {
       const stalled = state.lastStreamEventAt > 0
-        && (Date.now() - state.lastStreamEventAt) > STREAM_STALL_TIMEOUT_MS
+        && (now - state.lastStreamEventAt) > STREAM_STALL_TIMEOUT_MS
       if (stalled) {
-        appendEventLog('Codex: stream stalled, forcing recovery')
-        stopThinkingAnimation()
-        state.lastStreamEventAt = 0
-
-        const partial = sanitizeDisplayText(
-          state.pendingDelta
-          || state.streamingText
-          || state.currentResponse
-          || state.lastAgentMessageSnapshot
-          || '',
-        )
-
-        if (partial) {
-          state.turnCompletedPending = true
-          setStatus('Codex: stream stalled. Finalizing partial response...')
-          if (!state.pendingDelta && !state.streamingText) {
-            void finalizeCompletedTurn(bridge, setStatus)
-          }
-          return
-        }
-
-        resetTransientTurnState()
-        setViewState('error', 'Response stalled. Tap to reconnect.')
-        state.screen = 'root'
+        state.lastStreamEventAt = now
+        appendEventLog('Codex: stream stalled, checking thread state')
+        setViewState('waiting')
+        startThinkingAnimation(bridge)
         void renderPage(bridge)
-        setStatus('Codex: response stalled. Tap to reconnect.')
+
+        if (!state.stallRecoveryInFlight) {
+          state.stallRecoveryInFlight = true
+          setStatus('Codex: syncing response state...')
+          void recoverActiveTurnFromThreadRead(bridge, setStatus).finally(() => {
+            state.stallRecoveryInFlight = false
+          })
+        }
         return
       }
     }
@@ -1538,6 +1603,76 @@ async function refreshThreadList(): Promise<void> {
   state.listSelectedIndex = clampIndex(state.listSelectedIndex, buildListEntries().length)
 }
 
+async function recoverActiveTurnFromThreadRead(
+  bridge: EvenAppBridge,
+  setStatus: SetStatus,
+): Promise<boolean> {
+  if (!state.client || !state.activeThreadId) {
+    return false
+  }
+
+  try {
+    const result = await state.client.request<{ thread?: unknown }>('thread/read', {
+      threadId: state.activeThreadId,
+      includeTurns: true,
+    })
+
+    const activeTurn = findActiveTurnInThread(result.thread)
+    if (!activeTurn) {
+      return false
+    }
+
+    const turnId = typeof activeTurn.id === 'string' ? activeTurn.id : ''
+    if (state.activeTurnId && turnId && turnId !== state.activeTurnId) {
+      return false
+    }
+    if (!state.activeTurnId && turnId) {
+      state.activeTurnId = turnId
+    }
+
+    const turnStatus = typeof activeTurn.status === 'string' ? activeTurn.status : ''
+    if (turnStatus !== 'completed') {
+      if (turnStatus === 'failed') {
+        const errMessage = parseErrorMessage(activeTurn.error)
+        resetTransientTurnState()
+        setViewState('error', errMessage || 'Turn failed')
+        await renderPage(bridge)
+        setStatus(`Codex: ${errMessage || 'turn failed'}`)
+      }
+      return false
+    }
+
+    const fullText = extractAgentTextFromTurn(activeTurn)
+    if (fullText) {
+      state.lastAgentMessageSnapshot = fullText
+
+      const alreadyShown = sanitizeDisplayText(state.streamingText || state.currentResponse)
+      if (!alreadyShown) {
+        state.pendingDelta += fullText
+      } else if (fullText.startsWith(alreadyShown)) {
+        const remainder = fullText.slice(alreadyShown.length)
+        if (remainder) {
+          state.pendingDelta += remainder
+        }
+      } else if (!state.pendingDelta) {
+        state.streamingText = ''
+        state.currentResponse = ''
+        state.pendingDelta += fullText
+      }
+    }
+
+    state.turnCompletedPending = true
+    state.lastStreamEventAt = Date.now()
+    ensureStreamingDrainLoop(bridge, setStatus)
+    appendEventLog('Codex: recovered final turn state from thread/read')
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    appendEventLog(`Codex: thread/read recovery failed - ${message}`)
+    return false
+  }
+}
+
 function resetTransientTurnState(): void {
   stopThinkingAnimation()
   stopStreamingDrain()
@@ -1549,6 +1684,7 @@ function resetTransientTurnState(): void {
   state.turnCompletedPending = false
   state.activeTurnId = null
   state.lastStreamEventAt = 0
+  state.stallRecoveryInFlight = false
 }
 
 async function connectToCodex(bridge: EvenAppBridge, setStatus: SetStatus): Promise<void> {
