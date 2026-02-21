@@ -121,6 +121,24 @@ function isDirectoryGitPath(workingDirectory: string, gitPath: string): boolean 
   }
 }
 
+function resolveGitPathInWorkingDirectory(
+  workingDirectory: string,
+  repoRoot: string,
+  gitPath: string,
+): string | null {
+  const repoRelative = resolve(repoRoot, gitPath)
+  if (isInsideDirectory(workingDirectory, repoRelative)) {
+    return repoRelative
+  }
+
+  const workingRelative = resolve(workingDirectory, gitPath)
+  if (isInsideDirectory(workingDirectory, workingRelative)) {
+    return workingRelative
+  }
+
+  return null
+}
+
 function resolveWorkingDirectory(raw: unknown, fallback: string): string {
   if (typeof raw !== 'string' || !raw.trim()) {
     return resolve(fallback)
@@ -139,7 +157,11 @@ function isDirectory(pathValue: string): boolean {
   }
 }
 
-function parseGitChangedFiles(stdout: string, workingDirectory: string): GitChangedFile[] {
+function parseGitChangedFiles(
+  stdout: string,
+  workingDirectory: string,
+  repoRoot: string,
+): GitChangedFile[] {
   const lines = stdout.split('\n')
   const files: GitChangedFile[] = []
 
@@ -166,12 +188,22 @@ function parseGitChangedFiles(stdout: string, workingDirectory: string): GitChan
       filePath = filePath.slice(1, -1)
     }
 
-    if (isDirectoryGitPath(workingDirectory, filePath)) {
+    const resolvedPath = resolveGitPathInWorkingDirectory(workingDirectory, repoRoot, filePath)
+    if (!resolvedPath) {
+      continue
+    }
+
+    const normalizedPath = relative(workingDirectory, resolvedPath) || '.'
+    if (!normalizedPath || normalizedPath === '.') {
+      continue
+    }
+
+    if (isDirectoryGitPath(workingDirectory, normalizedPath)) {
       continue
     }
 
     files.push({
-      path: filePath,
+      path: normalizedPath,
       status,
     })
   }
@@ -187,6 +219,40 @@ function isInsideDirectory(rootDir: string, targetPath: string): boolean {
 
 function trimDiffOutput(value: string): string {
   return value.trim() ? value : ''
+}
+
+function buildSyntheticNewFileDiff(gitPath: string, absolutePath: string): string {
+  try {
+    const raw = readFileSync(absolutePath, 'utf8')
+    const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const hasTrailingNewline = normalized.endsWith('\n')
+    const splitLines = normalized.split('\n')
+    const lines = hasTrailingNewline ? splitLines.slice(0, -1) : splitLines
+
+    const header = [
+      `diff --git a/${gitPath} b/${gitPath}`,
+      'new file mode 100644',
+      'index 0000000..0000000',
+      '--- /dev/null',
+      `+++ b/${gitPath}`,
+    ]
+
+    if (lines.length === 0) {
+      return header.join('\n')
+    }
+
+    const hunks = [`@@ -0,0 +1,${String(lines.length)} @@`]
+    for (const line of lines) {
+      hunks.push(`+${line}`)
+    }
+    if (!hasTrailingNewline) {
+      hunks.push('\\ No newline at end of file')
+    }
+
+    return [...header, ...hunks].join('\n')
+  } catch {
+    return ''
+  }
 }
 
 function g2BridgePlugin(env: Record<string, string>): Plugin {
@@ -479,7 +545,12 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
             return
           }
 
-          const files = parseGitChangedFiles(statusResult.stdout, workingDirectory)
+          const repoRootResult = runGit(workingDirectory, ['rev-parse', '--show-toplevel'])
+          const repoRoot = repoRootResult.status === 0
+            ? repoRootResult.stdout.trim() || workingDirectory
+            : workingDirectory
+
+          const files = parseGitChangedFiles(statusResult.stdout, workingDirectory, repoRoot)
           sendJson(res, 200, { files })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
@@ -515,8 +586,22 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
             return
           }
 
-          const resolvedPath = resolve(workingDirectory, requestedPath)
-          if (!isInsideDirectory(workingDirectory, resolvedPath)) {
+          const repoCheck = runGit(workingDirectory, ['rev-parse', '--show-toplevel'])
+          if (repoCheck.status !== 0) {
+            sendJson(res, 200, {
+              path: requestedPath,
+              diff: '(Working directory is not a git repository)',
+            })
+            return
+          }
+
+          const repoRoot = repoCheck.stdout.trim() || workingDirectory
+          const resolvedPath = resolveGitPathInWorkingDirectory(
+            workingDirectory,
+            repoRoot,
+            requestedPath,
+          )
+          if (!resolvedPath) {
             sendText(res, 400, 'Requested file path is outside working directory')
             return
           }
@@ -530,15 +615,6 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
           }
 
           const gitPath = relative(workingDirectory, resolvedPath) || '.'
-
-          const repoCheck = runGit(workingDirectory, ['rev-parse', '--is-inside-work-tree'])
-          if (repoCheck.status !== 0) {
-            sendJson(res, 200, {
-              path: requestedPath,
-              diff: '(Working directory is not a git repository)',
-            })
-            return
-          }
 
           const unstaged = runGit(workingDirectory, [
             '-c',
@@ -566,10 +642,17 @@ function g2BridgePlugin(env: Record<string, string>): Plugin {
               '--no-index',
               '--',
               '/dev/null',
-              gitPath,
+              resolvedPath,
             ])
             if (untrackedDiff.status === 0 || untrackedDiff.status === 1) {
-              diff = trimDiffOutput(untrackedDiff.stdout)
+              diff = trimDiffOutput(`${untrackedDiff.stdout}\n${untrackedDiff.stderr}`.trim())
+            }
+          }
+
+          if (!diff && existsSync(resolvedPath) && !isDirectory(resolvedPath)) {
+            const synthetic = buildSyntheticNewFileDiff(gitPath, resolvedPath)
+            if (synthetic) {
+              diff = synthetic
             }
           }
 
