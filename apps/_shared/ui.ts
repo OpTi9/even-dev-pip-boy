@@ -61,33 +61,36 @@ export function wrapLine(line: string, maxChars: number): string[] {
 
   for (const word of words) {
     if (!current) {
-      if (word.length <= maxChars) {
+      const chars = Array.from(word)
+      if (chars.length <= maxChars) {
         current = word
         continue
       }
 
-      for (let i = 0; i < word.length; i += maxChars) {
-        lines.push(word.slice(i, i + maxChars))
+      for (let i = 0; i < chars.length; i += maxChars) {
+        lines.push(chars.slice(i, i + maxChars).join(''))
       }
       current = ''
       continue
     }
 
     const candidate = `${current} ${word}`
-    if (candidate.length <= maxChars) {
+    const candidateChars = Array.from(candidate)
+    if (candidateChars.length <= maxChars) {
       current = candidate
       continue
     }
 
     lines.push(current)
 
-    if (word.length <= maxChars) {
+    const wordChars = Array.from(word)
+    if (wordChars.length <= maxChars) {
       current = word
       continue
     }
 
-    for (let i = 0; i < word.length; i += maxChars) {
-      lines.push(word.slice(i, i + maxChars))
+    for (let i = 0; i < wordChars.length; i += maxChars) {
+      lines.push(wordChars.slice(i, i + maxChars).join(''))
     }
     current = ''
   }
@@ -116,7 +119,8 @@ export function wrapText(text: string, maxChars = DISPLAY.MAX_WRAP_CHARS): strin
 }
 
 export function truncateStatus(text: string, maxLen: number = DISPLAY.MAX_TITLE_CHARS): string {
-  if (text.length <= maxLen) {
+  const chars = Array.from(text)
+  if (chars.length <= maxLen) {
     return text
   }
 
@@ -124,7 +128,7 @@ export function truncateStatus(text: string, maxLen: number = DISPLAY.MAX_TITLE_
     return '…'
   }
 
-  return `${text.slice(0, maxLen - 1)}…`
+  return `${chars.slice(0, maxLen - 1).join('')}…`
 }
 
 export function buildProgressBar(pct: number, segments = DISPLAY.PROGRESS_SEGMENTS): string {

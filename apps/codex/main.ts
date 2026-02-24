@@ -1152,11 +1152,14 @@ async function upgradeTextContainer(
     return
   }
 
+  const encoder = new TextEncoder()
+  const safeLength = Math.max(1, encoder.encode(prevContent).length, encoder.encode(nextContent).length)
+
   const ok = await bridge.textContainerUpgrade(new TextContainerUpgrade({
     containerID,
     containerName,
     contentOffset: 0,
-    contentLength: Math.max(1, prevContent.length, nextContent.length),
+    contentLength: safeLength,
     content: nextContent,
   }))
 
