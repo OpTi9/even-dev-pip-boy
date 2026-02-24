@@ -728,40 +728,16 @@ All icons extend `IconBase` (SVG `ForwardRef` with `size` and `title` props). No
 
 ## Even-dev simulator environment
 
-[even-dev](https://github.com/BxNxM/even-dev) is a shared development environment for building and testing G2 apps with the Even Hub Simulator. It handles app discovery, dependency installation, Vite dev server configuration, and simulator launch.
-
-Repository: <https://github.com/BxNxM/even-dev>
+[even-dev](https://github.com/BxNxM/even-dev) is a shared development environment for building and testing G2 apps with the Even Hub Simulator. This repo contains our customized setup with Codex and G2Claude apps.
 
 ### Running apps
 
-Install and run:
-
 ```bash
-git clone https://github.com/BxNxM/even-dev.git
-cd even-dev
-npm install
-./start-even.sh
-```
+# Codex app
+npm run codex:up
 
-The launcher lists all available apps and prompts you to pick one. You can also select directly:
-
-```bash
-APP_NAME=demo ./start-even.sh
-```
-
-To run a local app by path without any configuration:
-
-```bash
-APP_PATH=../my-app ./start-even.sh
-```
-
-External apps can be registered in `apps.json` at the even-dev root (git URLs are auto-cloned on first run):
-
-```json
-{
-  "chess": "https://github.com/dmyster145/EvenChess",
-  "my-local-app": "../my-local-app"
-}
+# G2Claude app
+npm run g2:up
 ```
 
 ### App structure
@@ -851,7 +827,14 @@ body {
 - **If your app needs a backend server**, put it in a `server/` directory with its own `package.json`. Even-dev auto-detects and starts it alongside Vite.
 - **Use `@jappyjan/even-realities-ui`** for the browser settings page – Card, Button, Input, Text components give a consistent look across apps. See [browser UI component library](#browser-ui-component-library) above.
 
-**Reference apps:**
+**Reference apps in this repo:**
+
+| App | Description |
+|-----|-------------|
+| [codex](./apps/codex/) | Codex CLI on G2 - full Claude Code access via glasses |
+| [g2claude](./apps/g2claude/) | Alternative Claude integration for G2 |
+
+**External reference apps:**
 
 | App | Description | Source |
 |-----|-------------|--------|
@@ -1003,7 +986,14 @@ Every Even Hub app needs an `app.json` at the project root. This describes the a
 
 The `.ehpk` format is for future submission to the Even Hub portal (not yet available). Add `*.ehpk` to `.gitignore`.
 
-## Example apps
+## Apps in this repo
+
+| App | Description |
+|-----|-------------|
+| [codex](./apps/codex/) | Codex CLI on G2 - full Claude Code access via glasses |
+| [g2claude](./apps/g2claude/) | Claude integration via Telegram bot |
+
+## External example apps
 
 | App | Description | Source |
 |-----|-------------|--------|
