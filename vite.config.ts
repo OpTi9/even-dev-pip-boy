@@ -5,8 +5,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineConfig, loadEnv } from 'vite'
-import type { Alias, Plugin } from 'vite'
-import { loadAppPlugins } from './vite-plugins'
+import type { Plugin } from 'vite'
 
 const G2_SESSION_TTL_MS = 15 * 60 * 1000
 const G2_SESSION_MAX_RESPONSES = 20
@@ -686,90 +685,6 @@ function resolveGitEntry(name: string, value: string): string {
   return subpath ? resolve(base, subpath) : base
 }
 
-function loadExternalApps(): Record<string, string> {
-  const apps: Record<string, string> = {}
-
-  if (existsSync('apps.json')) {
-    const raw = JSON.parse(readFileSync('apps.json', 'utf8')) as Record<string, string>
-    for (const [name, value] of Object.entries(raw)) {
-      apps[name] = isGitUrl(value) ? resolveGitEntry(name, value) : resolve(value)
-    }
-  }
-
-  const appName = process.env.APP_NAME ?? process.env.VITE_APP_NAME ?? ''
-  const appPath = process.env.APP_PATH ?? ''
-  if (appName && appPath) {
-    apps[appName] = resolve(appPath)
-  }
-
-  return apps
-}
-
-const externalApps = loadExternalApps()
-
-// ---------------------------------------------------------------------------
-// External app HTML plugin: serve the external app's own index.html
-// ---------------------------------------------------------------------------
-
-function externalAppHtmlPlugin(): Plugin | null {
-  const selectedApp = process.env.VITE_APP_NAME ?? process.env.APP_NAME ?? ''
-  const appDir = externalApps[selectedApp]
-  if (!appDir) return null
-
-  const absAppDir = resolve(appDir)
-  const htmlPath = resolve(absAppDir, 'index.html')
-  if (!existsSync(htmlPath)) return null
-
-  return {
-    name: 'external-app-html',
-    configureServer(server) {
-      server.middlewares.use(async (req, res, next) => {
-        const url = req.url ?? ''
-        if (url !== '/' && url !== '/index.html') {
-          next()
-          return
-        }
-
-        try {
-          let html = readFileSync(htmlPath, 'utf-8')
-          // Rewrite local absolute paths to /@fs/ so Vite resolves them
-          // from the external app's directory instead of even-dev's root.
-          html = html.replace(
-            /(src|href)=(['"])\/(?!\/|@|http)/g,
-            `$1=$2/@fs/${absAppDir}/`,
-          )
-          html = await server.transformIndexHtml(url, html)
-          res.statusCode = 200
-          res.setHeader('Content-Type', 'text/html')
-          res.end(html)
-        } catch (error) {
-          next(error)
-        }
-      })
-    },
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Vite aliases + fs.allow from external apps
-// ---------------------------------------------------------------------------
-
-function buildAliases(): Alias[] {
-  return Object.entries(externalApps).map(([name, absPath]) => ({
-    find: `apps/${name}`,
-    replacement: absPath,
-  }))
-}
-
-function buildFsAllow(): string[] {
-  const dirs = new Set<string>()
-  for (const absPath of Object.values(externalApps)) {
-    dirs.add(absPath)
-    dirs.add(resolve(absPath, '..'))
-  }
-  return [...dirs]
-}
-
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -786,19 +701,14 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [
-      externalAppHtmlPlugin(),
       g2BridgePlugin(env),
-      ...loadAppPlugins({ externalApps }),
     ].filter((p): p is Plugin => p !== null),
-    resolve: {
-      alias: buildAliases(),
-    },
     server: {
       host: env.VITE_HOST || process.env.VITE_HOST || true,
       port: 5173,
       allowedHosts: allowedHosts.length > 0 ? allowedHosts : undefined,
       fs: {
-        allow: ['.', ...buildFsAllow()],
+        allow: ['.'],
       },
       proxy: {
         '/codex-ws': {
