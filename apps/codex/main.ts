@@ -970,33 +970,52 @@ function buildConversationLines(): string[] {
   return lines
 }
 
-function buildListLines(): string[] {
+function buildListViewportRows(): string[] {
   const entries = buildListEntries()
   state.listSelectedIndex = clampIndex(state.listSelectedIndex, entries.length)
 
-  return entries.map((entry, index) => {
-    const marker = index === state.listSelectedIndex ? '▶ ' : '  '
-    return `${marker}* ${entry.label}`
-  })
+  const visibleRows = DISPLAY.DISPLAY_WINDOW_LINES
+  const maxStart = Math.max(0, entries.length - visibleRows)
+  const startIndex = Math.min(
+    maxStart,
+    Math.max(0, state.listSelectedIndex - Math.floor(visibleRows / 2)),
+  )
+  const labelBudget = Math.max(8, DISPLAY.MAX_WRAP_CHARS - 4)
+  const rows = entries
+    .slice(startIndex, startIndex + visibleRows)
+    .map((entry, offset) => {
+      const absoluteIndex = startIndex + offset
+      const marker = absoluteIndex === state.listSelectedIndex ? '▶ ' : '  '
+      const label = truncateStatus(entry.label, labelBudget)
+      return `${marker}* ${label}`
+    })
+
+  while (rows.length < visibleRows) {
+    rows.push(' ')
+  }
+
+  return rows
 }
 
 function buildTextRender(): { titleText: string, bodyText: string } {
   state.statusLine = stateToStatusLine()
+  if (state.screen === 'list') {
+    const rows = buildListViewportRows()
+    return {
+      // Keep threads page marker-only: no scroll indicator, no list-page scrolling state.
+      titleText: truncateStatus(state.statusLine, DISPLAY.MAX_TITLE_CHARS),
+      bodyText: rows.join('\n'),
+    }
+  }
 
-  const all = state.screen === 'list'
-    ? buildListLines()
-    : buildConversationLines()
-
+  const all = buildConversationLines()
   if (all.length === 0) {
     all.push('Ready')
   }
 
   const visibleRows = DISPLAY.DISPLAY_WINDOW_LINES
   const maxOffset = Math.max(0, all.length - visibleRows)
-  if (state.screen === 'list') {
-    const preferred = Math.max(0, state.listSelectedIndex - 1)
-    state.scrollOffset = Math.min(maxOffset, preferred)
-  } else if (state.viewState === 'streaming') {
+  if (state.viewState === 'streaming') {
     state.scrollOffset = maxOffset
   } else {
     state.scrollOffset = Math.min(maxOffset, Math.max(0, state.scrollOffset))
