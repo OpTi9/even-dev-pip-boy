@@ -12,6 +12,16 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import type { AppActions, SetStatus } from '../_shared/app-types'
 import { appendEventLog } from '../_shared/log'
+import {
+  DISPLAY,
+  LAYOUT,
+  buildPageIndicator,
+  paginateLines,
+  sanitizeDisplayText,
+  truncateStatus,
+  truncateToByteLimit,
+  wrapText,
+} from '../_shared/ui'
 
 declare global {
   interface ImportMetaEnv {
@@ -306,12 +316,11 @@ type CodexRuntimeClient = {
   action: () => Promise<void>
 }
 
-const MAX_WRAP_CHARS = 45
-const DISPLAY_WINDOW_LINES = 9
 const SCROLL_COOLDOWN_MS = 80
 const SCROLL_LINES_PER_EVENT = 4
 const STREAM_INTERVAL_MS = 120
 const STREAM_CHARS_PER_TICK = 8
+const SPINNER_TICK_MS = 350
 const PCM_SAMPLE_RATE = 16_000
 const MIN_PCM_AUDIO_BYTES = 200
 const MAX_HISTORY_TURNS = 10
@@ -324,23 +333,8 @@ const STREAM_IDLE_TO_WAITING_MS = 1_500
 const DEFAULT_CODEX_APPROVAL_POLICY = 'never'
 const DEFAULT_CODEX_SANDBOX_MODE = 'danger-full-access'
 
-const THINKING_VERBS = [
-  'Thinking',
-  'Analyzing',
-  'Reasoning',
-  'Processing',
-  'Considering',
-  'Evaluating',
-]
-
-const THINKING_DOT_INTERVAL_MS = 350
-const THINKING_VERB_INTERVAL_MS = 3500
-const THINKING_DOTS_MAX = 3
-
-const SECTION_YOU = '── You ──'
-const SECTION_CODEX = '── Codex ──'
-const SCROLL_TRACK_CHAR = '.'
-const SCROLL_THUMB_CHAR = '#'
+const SECTION_YOU = 'You:'
+const SECTION_CODEX = 'Codex:'
 
 const WORKDIR_INPUT_ID = 'codex-workdir-input'
 const WORKDIR_CONTAINER_ID = 'codex-workdir-controls'
@@ -377,15 +371,13 @@ const state: {
   pendingDelta: string
   lastAgentMessageSnapshot: string
   turnCompletedPending: boolean
-  thinkingVerbIndex: number
-  thinkingDots: number
-  thinkingDotTickCount: number
+  spinnerTick: number
   thinkingIntervalId: number | null
   streamIntervalId: number | null
   micOpen: boolean
   pcmAudioChunks: Uint8Array[]
   pcmAudioBytes: number
-  scrollOffset: number
+  pageIndex: number
   lastScrollTime: number
   renderInFlight: boolean
   renderPending: boolean
@@ -418,15 +410,13 @@ const state: {
   pendingDelta: '',
   lastAgentMessageSnapshot: '',
   turnCompletedPending: false,
-  thinkingVerbIndex: 0,
-  thinkingDots: 1,
-  thinkingDotTickCount: 0,
+  spinnerTick: 0,
   thinkingIntervalId: null,
   streamIntervalId: null,
   micOpen: false,
   pcmAudioChunks: [],
   pcmAudioBytes: 0,
-  scrollOffset: 0,
+  pageIndex: 0,
   lastScrollTime: 0,
   renderInFlight: false,
   renderPending: false,
@@ -648,83 +638,6 @@ function isRebuildSuccess(result: unknown): boolean {
   return false
 }
 
-function sanitizeDisplayText(text: string): string {
-  return text
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
-    .replace(/\r/g, '')
-    .trim()
-}
-
-function wrapLine(rawLine: string): string[] {
-  const normalized = rawLine
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
-
-  if (!normalized.trim()) {
-    return []
-  }
-
-  const words = normalized.trim().split(/\s+/)
-  const lines: string[] = []
-  let current = ''
-
-  for (const word of words) {
-    if (!current) {
-      if (word.length <= MAX_WRAP_CHARS) {
-        current = word
-        continue
-      }
-
-      for (let i = 0; i < word.length; i += MAX_WRAP_CHARS) {
-        lines.push(word.slice(i, i + MAX_WRAP_CHARS))
-      }
-      current = ''
-      continue
-    }
-
-    const candidate = `${current} ${word}`
-    if (candidate.length <= MAX_WRAP_CHARS) {
-      current = candidate
-      continue
-    }
-
-    lines.push(current)
-
-    if (word.length <= MAX_WRAP_CHARS) {
-      current = word
-      continue
-    }
-
-    for (let i = 0; i < word.length; i += MAX_WRAP_CHARS) {
-      lines.push(word.slice(i, i + MAX_WRAP_CHARS))
-    }
-    current = ''
-  }
-
-  if (current) {
-    lines.push(current)
-  }
-
-  return lines
-}
-
-function wrapText(text: string): string[] {
-  const source = sanitizeDisplayText(text)
-  const rows = source.split('\n')
-  const wrapped: string[] = []
-
-  for (const row of rows) {
-    wrapped.push(...wrapLine(row))
-  }
-
-  if (wrapped.length === 0) {
-    return ['(empty)']
-  }
-
-  return wrapped
-}
-
 function appendConversationTurn(prompt: string, response: string): void {
   const safePrompt = sanitizeDisplayText(prompt)
   const safeResponse = sanitizeDisplayText(response)
@@ -743,8 +656,8 @@ function appendConversationTurn(prompt: string, response: string): void {
 }
 
 function scrollToBottom(lines: string[]): void {
-  const maxOffset = Math.max(0, lines.length - DISPLAY_WINDOW_LINES)
-  state.scrollOffset = maxOffset
+  const totalPages = Math.ceil(lines.length / DISPLAY.LINES_PER_PAGE)
+  state.pageIndex = Math.max(0, totalPages - 1)
 }
 
 function relativeTime(unixSeconds: number): string {
@@ -962,6 +875,23 @@ function findActiveTurnInThread(threadRaw: unknown): Record<string, unknown> | n
   return null
 }
 
+function spinnerFrame(): string {
+  const index = state.spinnerTick % DISPLAY.SPINNER_CHARS.length
+  return DISPLAY.SPINNER_CHARS[index] ?? DISPLAY.SPINNER_CHARS_ASCII[index] ?? DISPLAY.SPINNER_CHARS_ASCII[0]
+}
+
+function withPageIndicator(title: string, pageIndex: number, totalPages: number): string {
+  const indicator = buildPageIndicator(pageIndex, totalPages)
+  if (!indicator) {
+    return truncateStatus(title, DISPLAY.MAX_TITLE_CHARS)
+  }
+
+  const separator = ' '
+  const titleBudget = Math.max(1, DISPLAY.MAX_TITLE_CHARS - indicator.length - separator.length)
+  const compactTitle = truncateStatus(title, titleBudget)
+  return `${compactTitle}${separator}${indicator}`
+}
+
 function stateToStatusLine(): string {
   if (state.screen === 'list') {
     return state.threadList.length > 0
@@ -971,21 +901,21 @@ function stateToStatusLine(): string {
 
   switch (state.viewState) {
     case 'connecting':
-      return 'Connecting...'
+      return `${DISPLAY.SPINNER_CHARS[0]} Connecting`
     case 'idle':
       return state.conversationHistory.length > 0 ? 'Double-tap for new prompt' : 'Double-tap to start'
     case 'recording':
-      return 'Listening... double-tap to stop'
+      return `${DISPLAY.SPINNER_CHARS[2]} Listening`
     case 'transcribing':
-      return 'Transcribing...'
+      return `${spinnerFrame()} Transcribing`
     case 'waiting':
-      return `Codex: ${THINKING_VERBS[state.thinkingVerbIndex % THINKING_VERBS.length]}${'.'.repeat(state.thinkingDots)}`
+      return `${spinnerFrame()} Codex`
     case 'streaming':
-      return 'Receiving...'
+      return 'Receiving…'
     case 'displaying':
       return 'Tap for threads'
     case 'error':
-      return 'Error. Tap to reconnect'
+      return '[E] tap to retry'
     case 'list':
       return 'Threads'
     default:
@@ -1013,7 +943,7 @@ function buildConversationLines(): string[] {
         lines.push(SECTION_YOU, ...wrapText(state.currentPrompt))
       }
       lines.push(SECTION_CODEX)
-      lines.push(`${THINKING_VERBS[state.thinkingVerbIndex % THINKING_VERBS.length]}${'.'.repeat(state.thinkingDots)}`)
+      lines.push(`${spinnerFrame()} waiting`)
       break
     case 'streaming':
       if (state.currentPrompt) {
@@ -1042,65 +972,60 @@ function buildConversationLines(): string[] {
   return lines
 }
 
-function buildScrollbarLines(totalLines: number, scrollOffset: number, visible: number): string[] {
-  const rows = Array.from({ length: DISPLAY_WINDOW_LINES }, () => SCROLL_TRACK_CHAR)
-  const total = Math.max(visible, totalLines)
-  const maxOffset = Math.max(0, total - visible)
+function buildListViewportRows(): string[] {
+  const entries = buildListEntries()
+  state.listSelectedIndex = clampIndex(state.listSelectedIndex, entries.length)
 
-  const thumbSize = Math.max(1, Math.min(
-    visible,
-    Math.round((visible * visible) / total),
-  ))
-  const maxThumbTop = Math.max(0, visible - thumbSize)
-  const thumbTop = maxOffset > 0
-    ? Math.round((scrollOffset / maxOffset) * maxThumbTop)
-    : 0
+  const visibleRows = DISPLAY.DISPLAY_WINDOW_LINES
+  const maxStart = Math.max(0, entries.length - visibleRows)
+  const startIndex = Math.min(
+    maxStart,
+    Math.max(0, state.listSelectedIndex - Math.floor(visibleRows / 2)),
+  )
+  const labelBudget = Math.max(8, DISPLAY.MAX_WRAP_CHARS - 4)
+  const rows = entries
+    .slice(startIndex, startIndex + visibleRows)
+    .map((entry, offset) => {
+      const absoluteIndex = startIndex + offset
+      const marker = absoluteIndex === state.listSelectedIndex ? '▶ ' : '  '
+      const label = truncateStatus(entry.label, labelBudget)
+      return `${marker}* ${label}`
+    })
 
-  for (let i = 0; i < thumbSize; i += 1) {
-    rows[thumbTop + i] = SCROLL_THUMB_CHAR
+  while (rows.length < visibleRows) {
+    rows.push(' ')
   }
 
   return rows
 }
 
-function buildListLines(): string[] {
-  const entries = buildListEntries()
-  state.listSelectedIndex = clampIndex(state.listSelectedIndex, entries.length)
-
-  return entries.map((entry, index) => {
-    const marker = index === state.listSelectedIndex ? '> ' : '  '
-    return `${marker}* ${entry.label}`
-  })
-}
-
 function buildTextRender(): { titleText: string, bodyText: string } {
   state.statusLine = stateToStatusLine()
+  if (state.screen === 'list') {
+    const rows = buildListViewportRows()
+    return {
+      // Keep threads page marker-only: no scroll indicator, no list-page scrolling state.
+      titleText: truncateStatus(state.statusLine, DISPLAY.MAX_TITLE_CHARS),
+      bodyText: rows.join('\n'),
+    }
+  }
 
-  const all = state.screen === 'list'
-    ? buildListLines()
-    : buildConversationLines()
-
+  const all = buildConversationLines()
   if (all.length === 0) {
     all.push('Ready')
   }
 
-  const maxOffset = Math.max(0, all.length - DISPLAY_WINDOW_LINES)
-  if (state.screen === 'list') {
-    const preferred = Math.max(0, state.listSelectedIndex - 1)
-    state.scrollOffset = Math.min(maxOffset, preferred)
-  } else if (state.viewState === 'streaming') {
-    state.scrollOffset = maxOffset
-  } else {
-    state.scrollOffset = Math.min(maxOffset, Math.max(0, state.scrollOffset))
-  }
+  const { page, totalPages } = paginateLines(all, state.pageIndex, DISPLAY.LINES_PER_PAGE)
 
-  const page = all.slice(state.scrollOffset, state.scrollOffset + DISPLAY_WINDOW_LINES)
-  while (page.length < DISPLAY_WINDOW_LINES) {
-    page.push(' ')
+  // Auto-advance to last page when streaming
+  if (state.viewState === 'streaming') {
+    state.pageIndex = totalPages - 1
+  } else {
+    state.pageIndex = Math.min(totalPages - 1, Math.max(0, state.pageIndex))
   }
 
   return {
-    titleText: state.statusLine,
+    titleText: withPageIndicator(state.statusLine, state.pageIndex, totalPages),
     bodyText: page.join('\n'),
   }
 }
@@ -1112,22 +1037,25 @@ function buildTextConfig(titleText: string, bodyText: string): {
   const title = new TextContainerProperty({
     containerID: TITLE_CONTAINER_ID,
     containerName: TITLE_CONTAINER_NAME,
-    content: titleText,
-    xPosition: 8,
-    yPosition: 0,
-    width: 560,
-    height: 36,
+    content: truncateToByteLimit(titleText, 100),
+    xPosition: LAYOUT.TITLE_X,
+    yPosition: LAYOUT.TITLE_Y,
+    width: LAYOUT.TITLE_W,
+    height: LAYOUT.TITLE_H,
+    borderWidth: LAYOUT.TITLE_BORDER_WIDTH,
+    borderColor: LAYOUT.TITLE_BORDER_COLOR,
     isEventCapture: 0,
   })
 
   const body = new TextContainerProperty({
     containerID: BODY_CONTAINER_ID,
     containerName: BODY_CONTAINER_NAME,
-    content: bodyText,
-    xPosition: 8,
-    yPosition: 40,
-    width: 560,
-    height: 248,
+    content: truncateToByteLimit(bodyText, 800),
+    xPosition: LAYOUT.BODY_X,
+    yPosition: LAYOUT.BODY_Y,
+    width: LAYOUT.BODY_W_FULL,
+    height: LAYOUT.BODY_H,
+    paddingLength: LAYOUT.BODY_PADDING,
     isEventCapture: 1,
   })
 
@@ -1222,11 +1150,14 @@ async function upgradeTextContainer(
     return
   }
 
+  const encoder = new TextEncoder()
+  const safeLength = Math.max(1, encoder.encode(prevContent).length, encoder.encode(nextContent).length)
+
   const ok = await bridge.textContainerUpgrade(new TextContainerUpgrade({
     containerID,
     containerName,
     contentOffset: 0,
-    contentLength: Math.max(1, prevContent.length, nextContent.length),
+    contentLength: safeLength,
     content: nextContent,
   }))
 
@@ -1252,10 +1183,17 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
       if (!state.startupRendered) {
         const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
         if (result !== 0) {
-          appendEventLog(`Codex: startup create failed for text screen (${String(result)}), trying rebuild`)
-          const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
-          if (!isRebuildSuccess(rebuildResult)) {
-            throw new Error(`createStartUpPageContainer failed (${String(result)}); rebuild fallback failed (${String(rebuildResult)})`)
+          if (result === 1) {
+            const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+            if (!isRebuildSuccess(rebuildResult)) {
+              throw new Error(`rebuild fallback failed (${String(rebuildResult)})`)
+            }
+          } else {
+            appendEventLog(`Codex: startup create failed (${String(result)}), trying rebuild`)
+            const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+            if (!isRebuildSuccess(rebuildResult)) {
+              throw new Error(`createStartUpPageContainer failed (${String(result)}); rebuild fallback failed (${String(rebuildResult)})`)
+            }
           }
         }
         state.startupRendered = true
@@ -1310,34 +1248,26 @@ function setViewState(next: ViewState, detail?: string): void {
   }
 }
 
-function stopThinkingAnimation(): void {
+function stopSpinnerAnimation(): void {
   if (state.thinkingIntervalId !== null) {
     window.clearInterval(state.thinkingIntervalId)
     state.thinkingIntervalId = null
   }
-  state.thinkingVerbIndex = 0
-  state.thinkingDots = 1
-  state.thinkingDotTickCount = 0
+  state.spinnerTick = 0
 }
 
-function startThinkingAnimation(bridge: EvenAppBridge): void {
-  stopThinkingAnimation()
-  const ticksPerVerb = Math.max(1, Math.round(THINKING_VERB_INTERVAL_MS / THINKING_DOT_INTERVAL_MS))
+function startSpinnerAnimation(bridge: EvenAppBridge): void {
+  stopSpinnerAnimation()
   state.thinkingIntervalId = window.setInterval(() => {
-    if (state.viewState !== 'waiting') {
-      stopThinkingAnimation()
+    if (state.viewState !== 'waiting' && state.viewState !== 'transcribing') {
+      stopSpinnerAnimation()
       return
     }
 
-    state.thinkingDots = (state.thinkingDots % THINKING_DOTS_MAX) + 1
-    state.thinkingDotTickCount += 1
-    if (state.thinkingDotTickCount >= ticksPerVerb) {
-      state.thinkingDotTickCount = 0
-      state.thinkingVerbIndex = (state.thinkingVerbIndex + 1) % THINKING_VERBS.length
-    }
+    state.spinnerTick += 1
 
     void renderPage(bridge)
-  }, THINKING_DOT_INTERVAL_MS)
+  }, SPINNER_TICK_MS)
 }
 
 function stopStreamingDrain(): void {
@@ -1357,7 +1287,7 @@ async function finalizeCompletedTurn(bridge: EvenAppBridge, setStatus: SetStatus
   }
 
   stopStreamingDrain()
-  stopThinkingAnimation()
+  stopSpinnerAnimation()
 
   state.currentPrompt = ''
   state.currentResponse = ''
@@ -1395,7 +1325,7 @@ function ensureStreamingDrainLoop(bridge: EvenAppBridge, setStatus: SetStatus): 
       (now - state.lastStreamEventAt) > STREAM_IDLE_TO_WAITING_MS
     ) {
       setViewState('waiting')
-      startThinkingAnimation(bridge)
+      startSpinnerAnimation(bridge)
       void renderPage(bridge)
     }
 
@@ -1406,7 +1336,7 @@ function ensureStreamingDrainLoop(bridge: EvenAppBridge, setStatus: SetStatus): 
         state.lastStreamEventAt = now
         appendEventLog('Codex: stream stalled, checking thread state')
         setViewState('waiting')
-        startThinkingAnimation(bridge)
+        startSpinnerAnimation(bridge)
         void renderPage(bridge)
 
         if (!state.stallRecoveryInFlight) {
@@ -1421,7 +1351,7 @@ function ensureStreamingDrainLoop(bridge: EvenAppBridge, setStatus: SetStatus): 
     }
 
     if (state.pendingDelta.length > 0) {
-      stopThinkingAnimation()
+      stopSpinnerAnimation()
       if (state.viewState === 'waiting') {
         setViewState('streaming')
       }
@@ -1466,7 +1396,7 @@ async function stopActiveMic(bridge: EvenAppBridge): Promise<void> {
 
 async function startRecording(bridge: EvenAppBridge, setStatus: SetStatus): Promise<void> {
   await stopActiveMic(bridge)
-  stopThinkingAnimation()
+  stopSpinnerAnimation()
   stopStreamingDrain()
 
   state.pcmAudioChunks = []
@@ -1687,7 +1617,7 @@ async function recoverActiveTurnFromThreadRead(
 }
 
 function resetTransientTurnState(): void {
-  stopThinkingAnimation()
+  stopSpinnerAnimation()
   stopStreamingDrain()
   state.currentPrompt = ''
   state.currentResponse = ''
@@ -1894,6 +1824,7 @@ async function stopRecordingAndSendTurn(bridge: EvenAppBridge, setStatus: SetSta
   }
 
   setViewState('transcribing')
+  startSpinnerAnimation(bridge)
   await renderPage(bridge)
   setStatus('Codex: transcribing audio...')
 
@@ -1925,7 +1856,7 @@ async function stopRecordingAndSendTurn(bridge: EvenAppBridge, setStatus: SetSta
   state.activeTurnId = typeof turn?.id === 'string' ? turn.id : null
 
   setStatus('Codex: waiting for response...')
-  startThinkingAnimation(bridge)
+  startSpinnerAnimation(bridge)
   ensureStreamingDrainLoop(bridge, setStatus)
 }
 
@@ -1983,7 +1914,7 @@ async function handleNotification(
 
       if (status === 'completed') {
         state.lastStreamEventAt = Date.now()
-        stopThinkingAnimation()
+        stopSpinnerAnimation()
 
         if (!state.streamingText && !state.pendingDelta) {
           const fallback = sanitizeDisplayText(state.lastAgentMessageSnapshot)
@@ -2048,19 +1979,20 @@ async function handleServerRequest(
 
 function moveConversationScroll(bridge: EvenAppBridge, delta: number): void {
   const all = buildConversationLines()
-  if (all.length <= DISPLAY_WINDOW_LINES) {
+  const totalPages = Math.ceil(all.length / DISPLAY.LINES_PER_PAGE)
+
+  if (totalPages <= 1) {
     return
   }
 
-  const step = delta < 0 ? -SCROLL_LINES_PER_EVENT : SCROLL_LINES_PER_EVENT
-  const maxOffset = Math.max(0, all.length - DISPLAY_WINDOW_LINES)
-  const next = Math.min(maxOffset, Math.max(0, state.scrollOffset + step))
+  const step = delta < 0 ? 1 : -1
+  const next = Math.min(totalPages - 1, Math.max(0, state.pageIndex + step))
 
-  if (next === state.scrollOffset) {
+  if (next === state.pageIndex) {
     return
   }
 
-  state.scrollOffset = next
+  state.pageIndex = next
   void renderPage(bridge)
 }
 
