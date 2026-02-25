@@ -1,26 +1,28 @@
 export const LAYOUT = {
   CANVAS_W: 576,
   CANVAS_H: 288,
-  TITLE_X: 8,
+  TITLE_X: 4,
   TITLE_Y: 0,
-  TITLE_W: 560,
+  TITLE_W: 568,
   TITLE_H: 28,
-  BODY_X: 8,
+  BODY_X: 4,
   BODY_Y: 28,
   BODY_H: 260,
-  BODY_W_FULL: 560,
-  BODY_W_SCROLL: 548,
+  BODY_W_FULL: 568,
+  BODY_W_SCROLL: 568,
   BODY_PADDING: 4,
   SCROLLBAR_X: 562,
   SCROLLBAR_W: 10,
-  TITLE_BORDER_WIDTH: 1,
+  TITLE_BORDER_WIDTH: 0,
   TITLE_BORDER_COLOR: 8,
 } as const
 
 export const DISPLAY = {
-  MAX_WRAP_CHARS: 40,
+  MAX_WRAP_CHARS: 58,
   DISPLAY_WINDOW_LINES: 9,
   MAX_TITLE_CHARS: 35,
+  CHARS_PER_LINE: 58,
+  LINES_PER_PAGE: 9,
   SCROLL_TRACK_CHAR: '·',
   SCROLL_THUMB_CHAR: '•',
   SCROLL_ARROW_TOP: '▲',
@@ -196,4 +198,66 @@ export function buildScrollIndicator(
   const empty = safeSegments - filled
 
   return `${DISPLAY.SCROLL_INDICATOR_FILLED.repeat(filled)}${DISPLAY.SCROLL_INDICATOR_EMPTY.repeat(empty)}`
+}
+
+export function truncateToByteLimit(text: string, maxBytes: number = 1000): string {
+  const encoder = new TextEncoder()
+  const bytes = encoder.encode(text)
+
+  if (bytes.length <= maxBytes) {
+    return text
+  }
+
+  const chars = Array.from(text)
+  let safeLength = 0
+  let safeString = ''
+
+  for (const char of chars) {
+    const charBytes = encoder.encode(char).length
+    if (safeLength + charBytes > maxBytes - 3) {
+      return safeString + '...'
+    }
+    safeLength += charBytes
+    safeString += char
+  }
+
+  return safeString
+}
+
+export function paginateLines(
+  lines: string[],
+  pageIndex: number,
+  linesPerPage: number = DISPLAY.LINES_PER_PAGE,
+): { page: string[], totalPages: number } {
+  if (lines.length === 0) {
+    return { page: [], totalPages: 1 }
+  }
+
+  const totalPages = Math.max(1, Math.ceil(lines.length / linesPerPage))
+  const safePageIndex = Math.max(0, Math.min(totalPages - 1, pageIndex))
+
+  const start = safePageIndex * linesPerPage
+  const page = lines.slice(start, start + linesPerPage)
+
+  while (page.length < linesPerPage) {
+    page.push('')
+  }
+
+  return { page, totalPages }
+}
+
+export function buildPageIndicator(
+  pageIndex: number,
+  totalPages: number,
+  segments: number = 8,
+): string {
+  if (totalPages <= 1) {
+    return ''
+  }
+
+  const safeSegments = Math.max(2, Math.floor(segments))
+  const filled = Math.max(1, Math.min(safeSegments, Math.round(((pageIndex + 1) / totalPages) * safeSegments)))
+  const empty = safeSegments - filled
+
+  return `[${DISPLAY.SCROLL_INDICATOR_FILLED.repeat(filled)}${DISPLAY.SCROLL_INDICATOR_EMPTY.repeat(empty)}]`
 }

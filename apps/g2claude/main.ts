@@ -13,11 +13,12 @@ import { appendEventLog } from '../_shared/log'
 import {
   DISPLAY,
   LAYOUT,
+  buildPageIndicator,
   buildProgressBar,
-  buildScrollIndicator,
-  buildScrollbarLines,
+  paginateLines,
   sanitizeDisplayText,
   truncateStatus,
+  truncateToByteLimit,
   wrapText,
 } from '../_shared/ui'
 
@@ -94,7 +95,7 @@ const state: {
   defaultWorkingDirectory: string
   workingDirectory: string
   screen: UiScreen
-  scrollOffset: number
+  pageIndex: number
   diffScrollOffset: number
   micOpen: boolean
   pcmAudioChunks: Uint8Array[]
@@ -138,7 +139,7 @@ const state: {
   defaultWorkingDirectory: FALLBACK_WORKING_DIRECTORY,
   workingDirectory: FALLBACK_WORKING_DIRECTORY,
   screen: 'root',
-  scrollOffset: 0,
+  pageIndex: 0,
   diffScrollOffset: 0,
   micOpen: false,
   pcmAudioChunks: [],
@@ -574,11 +575,8 @@ function appendConversationTurn(prompt: string, response: string): void {
 }
 
 function scrollToBottom(lines: string[]): void {
-  const visibleRows = state.screen === 'root' && shouldShowChangesButton()
-    ? DISPLAY.DISPLAY_WINDOW_LINES - 1
-    : DISPLAY.DISPLAY_WINDOW_LINES
-  const maxOffset = Math.max(0, lines.length - visibleRows)
-  state.scrollOffset = maxOffset
+  const totalPages = Math.ceil(lines.length / DISPLAY.LINES_PER_PAGE)
+  state.pageIndex = Math.max(0, totalPages - 1)
 }
 
 function clampIndex(index: number, length: number): number {
@@ -610,25 +608,13 @@ function shouldShowChangesButton(): boolean {
   return state.viewState === 'idle' || state.viewState === 'displaying'
 }
 
-function getCurrentTextScrollOffset(): number {
-  return state.screen === 'diff' ? state.diffScrollOffset : state.scrollOffset
-}
-
-function setCurrentTextScrollOffset(offset: number): void {
-  if (state.screen === 'diff') {
-    state.diffScrollOffset = offset
-    return
-  }
-  state.scrollOffset = offset
-}
-
 function spinnerFrame(): string {
   const index = state.spinnerTick % DISPLAY.SPINNER_CHARS.length
   return DISPLAY.SPINNER_CHARS[index] ?? DISPLAY.SPINNER_CHARS_ASCII[index] ?? DISPLAY.SPINNER_CHARS_ASCII[0]
 }
 
-function withScrollIndicator(title: string, scrollOffset: number, totalLines: number, visibleRows: number): string {
-  const indicator = buildScrollIndicator(scrollOffset, totalLines, visibleRows)
+function withPageIndicator(title: string, pageIndex: number, totalPages: number): string {
+  const indicator = buildPageIndicator(pageIndex, totalPages)
   if (!indicator) {
     return truncateStatus(title, DISPLAY.MAX_TITLE_CHARS)
   }
@@ -636,7 +622,7 @@ function withScrollIndicator(title: string, scrollOffset: number, totalLines: nu
   const separator = ' '
   const titleBudget = Math.max(1, DISPLAY.MAX_TITLE_CHARS - indicator.length - separator.length)
   const compactTitle = truncateStatus(title, titleBudget)
-  return `${compactTitle.padEnd(titleBudget)}${separator}${indicator}`
+  return `${compactTitle}${separator}${indicator}`
 }
 
 function stateToStatusLine(): string {
@@ -739,40 +725,39 @@ function buildTextRenderForScreen(): { titleText: string, bodyText: string, scro
   }
 
   const reserveBottomLine = state.screen === 'root' && shouldShowChangesButton()
-  const visibleContentRows = reserveBottomLine ? DISPLAY.DISPLAY_WINDOW_LINES - 1 : DISPLAY.DISPLAY_WINDOW_LINES
-  const maxOffset = Math.max(0, all.length - visibleContentRows)
-  let scrollOffset = 0
+  const visibleContentRows = reserveBottomLine ? DISPLAY.LINES_PER_PAGE - 1 : DISPLAY.LINES_PER_PAGE
+
+  // For changes screen, keep the existing selection-based scrolling
   if (state.screen === 'changes') {
-    const preferredOffset = Math.max(0, state.changesSelectedIndex - Math.floor(visibleContentRows / 2))
-    scrollOffset = Math.min(maxOffset, preferredOffset)
+    const totalPages = Math.ceil(all.length / visibleContentRows)
+    const preferredPage = Math.floor(state.changesSelectedIndex / visibleContentRows)
+    state.pageIndex = Math.min(totalPages - 1, Math.max(0, preferredPage))
   } else {
-    scrollOffset = getCurrentTextScrollOffset()
-    if (state.screen === 'root' && state.viewState === 'streaming') {
-      scrollOffset = maxOffset
+    // Auto-advance to last page when streaming
+    const totalPages = Math.ceil(all.length / DISPLAY.LINES_PER_PAGE)
+    if (state.viewState === 'streaming') {
+      state.pageIndex = Math.max(0, totalPages - 1)
     } else {
-      scrollOffset = Math.min(maxOffset, Math.max(0, scrollOffset))
+      state.pageIndex = Math.min(totalPages - 1, Math.max(0, state.pageIndex))
     }
-    setCurrentTextScrollOffset(scrollOffset)
   }
 
-  const page = all.slice(
-    scrollOffset,
-    scrollOffset + visibleContentRows,
-  )
+  const { page, totalPages } = paginateLines(all, state.pageIndex, visibleContentRows)
+
   while (page.length < visibleContentRows) {
     page.push(' ')
   }
   if (reserveBottomLine) {
     page.push(SHOW_CHANGES_LINE)
   }
-  while (page.length < DISPLAY.DISPLAY_WINDOW_LINES) {
+  while (page.length < DISPLAY.LINES_PER_PAGE) {
     page.push(' ')
   }
 
   return {
-    titleText: withScrollIndicator(state.statusLine, scrollOffset, all.length, visibleContentRows),
+    titleText: withPageIndicator(state.statusLine, state.pageIndex, totalPages),
     bodyText: page.join('\n'),
-    scrollbarText: buildScrollbarLines(all.length, scrollOffset, visibleContentRows).join('\n'),
+    scrollbarText: '',
   }
 }
 
@@ -810,7 +795,7 @@ function buildTextConfig(titleText: string, bodyText: string, scrollbarText: str
   const title = new TextContainerProperty({
     containerID: TITLE_CONTAINER_ID,
     containerName: TITLE_CONTAINER_NAME,
-    content: titleText,
+    content: truncateToByteLimit(titleText, 100),
     xPosition: LAYOUT.TITLE_X,
     yPosition: LAYOUT.TITLE_Y,
     width: LAYOUT.TITLE_W,
@@ -824,7 +809,7 @@ function buildTextConfig(titleText: string, bodyText: string, scrollbarText: str
     containerID: BODY_CONTAINER_ID,
     containerName: BODY_CONTAINER_NAME,
     isEventCapture: 1,
-    content: bodyText,
+    content: truncateToByteLimit(bodyText, 700),
     xPosition: LAYOUT.BODY_X,
     yPosition: LAYOUT.BODY_Y,
     width: LAYOUT.BODY_W_SCROLL,
@@ -835,7 +820,7 @@ function buildTextConfig(titleText: string, bodyText: string, scrollbarText: str
   const scrollbar = new TextContainerProperty({
     containerID: SCROLL_CONTAINER_ID,
     containerName: SCROLL_CONTAINER_NAME,
-    content: scrollbarText,
+    content: truncateToByteLimit(scrollbarText, 100),
     xPosition: LAYOUT.SCROLLBAR_X,
     yPosition: LAYOUT.BODY_Y,
     width: LAYOUT.SCROLLBAR_W,
@@ -1443,20 +1428,21 @@ function moveScroll(bridge: EvenAppBridge, delta: number): void {
   }
 
   const visibleRows = shouldShowChangesButton()
-    ? DISPLAY.DISPLAY_WINDOW_LINES - 1
-    : DISPLAY.DISPLAY_WINDOW_LINES
-  if (all.length <= visibleRows) {
+    ? DISPLAY.LINES_PER_PAGE - 1
+    : DISPLAY.LINES_PER_PAGE
+  const totalPages = Math.ceil(all.length / visibleRows)
+
+  if (totalPages <= 1) {
     return
   }
 
-  const step = delta < 0 ? -SCROLL_LINES_PER_EVENT : SCROLL_LINES_PER_EVENT
-  const maxOffset = Math.max(0, all.length - visibleRows)
-  const next = Math.min(maxOffset, Math.max(0, state.scrollOffset + step))
-  if (next === state.scrollOffset) {
+  const step = delta < 0 ? 1 : -1
+  const next = Math.min(totalPages - 1, Math.max(0, state.pageIndex + step))
+  if (next === state.pageIndex) {
     return
   }
 
-  state.scrollOffset = next
+  state.pageIndex = next
   void renderPage(bridge)
 }
 

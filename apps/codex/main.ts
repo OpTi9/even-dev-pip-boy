@@ -15,9 +15,11 @@ import { appendEventLog } from '../_shared/log'
 import {
   DISPLAY,
   LAYOUT,
-  buildScrollIndicator,
+  buildPageIndicator,
+  paginateLines,
   sanitizeDisplayText,
   truncateStatus,
+  truncateToByteLimit,
   wrapText,
 } from '../_shared/ui'
 
@@ -375,7 +377,7 @@ const state: {
   micOpen: boolean
   pcmAudioChunks: Uint8Array[]
   pcmAudioBytes: number
-  scrollOffset: number
+  pageIndex: number
   lastScrollTime: number
   renderInFlight: boolean
   renderPending: boolean
@@ -414,7 +416,7 @@ const state: {
   micOpen: false,
   pcmAudioChunks: [],
   pcmAudioBytes: 0,
-  scrollOffset: 0,
+  pageIndex: 0,
   lastScrollTime: 0,
   renderInFlight: false,
   renderPending: false,
@@ -654,8 +656,8 @@ function appendConversationTurn(prompt: string, response: string): void {
 }
 
 function scrollToBottom(lines: string[]): void {
-  const maxOffset = Math.max(0, lines.length - DISPLAY.DISPLAY_WINDOW_LINES)
-  state.scrollOffset = maxOffset
+  const totalPages = Math.ceil(lines.length / DISPLAY.LINES_PER_PAGE)
+  state.pageIndex = Math.max(0, totalPages - 1)
 }
 
 function relativeTime(unixSeconds: number): string {
@@ -878,8 +880,8 @@ function spinnerFrame(): string {
   return DISPLAY.SPINNER_CHARS[index] ?? DISPLAY.SPINNER_CHARS_ASCII[index] ?? DISPLAY.SPINNER_CHARS_ASCII[0]
 }
 
-function withScrollIndicator(title: string, scrollOffset: number, totalLines: number, visibleRows: number): string {
-  const indicator = buildScrollIndicator(scrollOffset, totalLines, visibleRows)
+function withPageIndicator(title: string, pageIndex: number, totalPages: number): string {
+  const indicator = buildPageIndicator(pageIndex, totalPages)
   if (!indicator) {
     return truncateStatus(title, DISPLAY.MAX_TITLE_CHARS)
   }
@@ -887,7 +889,7 @@ function withScrollIndicator(title: string, scrollOffset: number, totalLines: nu
   const separator = ' '
   const titleBudget = Math.max(1, DISPLAY.MAX_TITLE_CHARS - indicator.length - separator.length)
   const compactTitle = truncateStatus(title, titleBudget)
-  return `${compactTitle.padEnd(titleBudget)}${separator}${indicator}`
+  return `${compactTitle}${separator}${indicator}`
 }
 
 function stateToStatusLine(): string {
@@ -1013,21 +1015,17 @@ function buildTextRender(): { titleText: string, bodyText: string } {
     all.push('Ready')
   }
 
-  const visibleRows = DISPLAY.DISPLAY_WINDOW_LINES
-  const maxOffset = Math.max(0, all.length - visibleRows)
-  if (state.viewState === 'streaming') {
-    state.scrollOffset = maxOffset
-  } else {
-    state.scrollOffset = Math.min(maxOffset, Math.max(0, state.scrollOffset))
-  }
+  const { page, totalPages } = paginateLines(all, state.pageIndex, DISPLAY.LINES_PER_PAGE)
 
-  const page = all.slice(state.scrollOffset, state.scrollOffset + visibleRows)
-  while (page.length < visibleRows) {
-    page.push(' ')
+  // Auto-advance to last page when streaming
+  if (state.viewState === 'streaming') {
+    state.pageIndex = totalPages - 1
+  } else {
+    state.pageIndex = Math.min(totalPages - 1, Math.max(0, state.pageIndex))
   }
 
   return {
-    titleText: withScrollIndicator(state.statusLine, state.scrollOffset, all.length, visibleRows),
+    titleText: withPageIndicator(state.statusLine, state.pageIndex, totalPages),
     bodyText: page.join('\n'),
   }
 }
@@ -1039,7 +1037,7 @@ function buildTextConfig(titleText: string, bodyText: string): {
   const title = new TextContainerProperty({
     containerID: TITLE_CONTAINER_ID,
     containerName: TITLE_CONTAINER_NAME,
-    content: titleText,
+    content: truncateToByteLimit(titleText, 100),
     xPosition: LAYOUT.TITLE_X,
     yPosition: LAYOUT.TITLE_Y,
     width: LAYOUT.TITLE_W,
@@ -1052,7 +1050,7 @@ function buildTextConfig(titleText: string, bodyText: string): {
   const body = new TextContainerProperty({
     containerID: BODY_CONTAINER_ID,
     containerName: BODY_CONTAINER_NAME,
-    content: bodyText,
+    content: truncateToByteLimit(bodyText, 800),
     xPosition: LAYOUT.BODY_X,
     yPosition: LAYOUT.BODY_Y,
     width: LAYOUT.BODY_W_FULL,
@@ -1185,10 +1183,17 @@ async function renderPage(bridge: EvenAppBridge): Promise<void> {
       if (!state.startupRendered) {
         const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
         if (result !== 0) {
-          appendEventLog(`Codex: startup create failed for text screen (${String(result)}), trying rebuild`)
-          const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
-          if (!isRebuildSuccess(rebuildResult)) {
-            throw new Error(`createStartUpPageContainer failed (${String(result)}); rebuild fallback failed (${String(rebuildResult)})`)
+          if (result === 1) {
+            const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+            if (!isRebuildSuccess(rebuildResult)) {
+              throw new Error(`rebuild fallback failed (${String(rebuildResult)})`)
+            }
+          } else {
+            appendEventLog(`Codex: startup create failed (${String(result)}), trying rebuild`)
+            const rebuildResult = await bridge.rebuildPageContainer(new RebuildPageContainer(config))
+            if (!isRebuildSuccess(rebuildResult)) {
+              throw new Error(`createStartUpPageContainer failed (${String(result)}); rebuild fallback failed (${String(rebuildResult)})`)
+            }
           }
         }
         state.startupRendered = true
@@ -1974,19 +1979,20 @@ async function handleServerRequest(
 
 function moveConversationScroll(bridge: EvenAppBridge, delta: number): void {
   const all = buildConversationLines()
-  if (all.length <= DISPLAY.DISPLAY_WINDOW_LINES) {
+  const totalPages = Math.ceil(all.length / DISPLAY.LINES_PER_PAGE)
+
+  if (totalPages <= 1) {
     return
   }
 
-  const step = delta < 0 ? -SCROLL_LINES_PER_EVENT : SCROLL_LINES_PER_EVENT
-  const maxOffset = Math.max(0, all.length - DISPLAY.DISPLAY_WINDOW_LINES)
-  const next = Math.min(maxOffset, Math.max(0, state.scrollOffset + step))
+  const step = delta < 0 ? 1 : -1
+  const next = Math.min(totalPages - 1, Math.max(0, state.pageIndex + step))
 
-  if (next === state.scrollOffset) {
+  if (next === state.pageIndex) {
     return
   }
 
-  state.scrollOffset = next
+  state.pageIndex = next
   void renderPage(bridge)
 }
 
